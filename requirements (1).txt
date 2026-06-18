@@ -1,0 +1,4 @@
+python-telegram-bot==21.5
+anthropic==0.34.0
+gspread==6.1.2
+google-auth==2.34.0
