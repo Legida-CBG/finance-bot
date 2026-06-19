@@ -62,21 +62,45 @@ CATEGORIES = [
 ]
 
 # ─── Wallets ────────────────────────────────────────────────────────────────
-# Row of the wallet's header (e.g. "RBC Credit") on the "BUDGET - <Month> <Year>" sheet.
-# Column A = date+description, Column B = income, Column C = outcome, Column D = Transfer.
-WALLET_HEADER_ROWS = {
-    "RBC Credit":   73,
-    "RBC Checking": 144,
-    "Costco":       179,
-    "Walmart":      214,
-    "Cash":         249,
-}
+# Column A = wallet name (header row) / date+description (data rows)
+# Column B = income, Column C = outcome, Column D = Transfer.
+# Header row numbers are looked up dynamically (see find_wallet_header_row)
+# rather than hardcoded, since the sheet can be edited elsewhere and rows shift.
 WALLET_COL_DATE_DESC = 1  # column A
 WALLET_COL_INCOME    = 2  # column B
 WALLET_COL_OUTCOME   = 3  # column C
 WALLET_COL_TRANSFER  = 4  # column D
 
-WALLET_NAMES = list(WALLET_HEADER_ROWS.keys())
+WALLET_NAMES = ["RBC Credit", "RBC Checking", "Costco", "Walmart", "Cash"]
+
+# Cache of {sheet_title: {wallet_name: header_row}} to avoid re-scanning the whole
+# column on every single write within the same process lifetime. Cleared per-process;
+# Railway restarts will naturally refresh it.
+_wallet_row_cache: dict = {}
+
+
+def find_wallet_header_row(ws, wallet: str) -> int:
+    """Find the row where column A exactly equals the wallet's name.
+    Searches dynamically instead of relying on a fixed row number, since rows
+    can shift if the sheet is edited elsewhere (e.g. budget section above)."""
+    cache_key = ws.title
+    cached = _wallet_row_cache.get(cache_key, {})
+    if wallet in cached:
+        # Verify the cached row is still correct before trusting it
+        cell_val = (ws.cell(cached[wallet], WALLET_COL_DATE_DESC).value or "").strip()
+        if cell_val.lower() == wallet.lower():
+            return cached[wallet]
+
+    col_values = ws.col_values(WALLET_COL_DATE_DESC)  # 1-indexed list, column A
+    for idx, val in enumerate(col_values, start=1):
+        if (val or "").strip().lower() == wallet.lower():
+            _wallet_row_cache.setdefault(cache_key, {})[wallet] = idx
+            return idx
+
+    raise ValueError(
+        f"Не нашёл кошелёк '{wallet}' на листе '{ws.title}'. "
+        f"Проверь, что название в колонке A написано точно так же."
+    )
 
 
 def get_sheet():
@@ -147,18 +171,9 @@ def find_next_wallet_row(ws, header_row: int) -> int:
     raise ValueError("Не нашёл свободную строку в блоке кошелька (блок переполнен).")
 
 
-def verify_wallet_block(ws, wallet: str, header_row: int):
-    """Safety check: confirm the header_row actually contains this wallet's name
-    in column A and that the next row has the income/outcome/Transfer labels.
-    Raises if the sheet structure doesn't match what we expect, instead of
-    silently writing into the wrong place."""
-    name_cell = (ws.cell(header_row, WALLET_COL_DATE_DESC).value or "").strip()
-    if name_cell.lower() != wallet.lower():
-        raise ValueError(
-            f"Структура листа изменилась: ожидал '{wallet}' в строке {header_row}, "
-            f"но нашёл '{name_cell}'. Запись отменена, ничего не испорчено."
-        )
-
+def verify_wallet_labels(ws, header_row: int):
+    """Safety check: confirm the row right after the wallet's name row has the
+    income/outcome/Transfer labels, as a sanity check on sheet structure."""
     labels_row = header_row + 1
     income_label = (ws.cell(labels_row, WALLET_COL_INCOME).value or "").strip().lower()
     outcome_label = (ws.cell(labels_row, WALLET_COL_OUTCOME).value or "").strip().lower()
@@ -172,14 +187,14 @@ def verify_wallet_block(ws, wallet: str, header_row: int):
 def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     """Write an income or outcome entry into the wallet's block on the BUDGET sheet.
     kind: 'income' or 'outcome'."""
-    if wallet not in WALLET_HEADER_ROWS:
+    if wallet not in WALLET_NAMES:
         raise ValueError(f"Неизвестный кошелёк: {wallet}")
 
     spreadsheet = get_sheet()
     ws = get_budget_worksheet(spreadsheet)
-    header_row = WALLET_HEADER_ROWS[wallet]
+    header_row = find_wallet_header_row(ws, wallet)
 
-    verify_wallet_block(ws, wallet, header_row)
+    verify_wallet_labels(ws, header_row)
 
     # Data rows start right after the income/outcome/Transfer label row
     labels_row = header_row + 1
@@ -486,14 +501,14 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     args_text = update.message.text.partition(" ")[2].strip()
-    wallet = args_text if args_text in WALLET_HEADER_ROWS else "RBC Checking"
+    wallet = args_text if args_text in WALLET_NAMES else "RBC Checking"
 
     try:
         spreadsheet = get_sheet()
         ws = get_budget_worksheet(spreadsheet)
-        header_row = WALLET_HEADER_ROWS[wallet]
+        header_row = find_wallet_header_row(ws, wallet)
 
-        lines = [f"📄 Лист: {ws.title}", f"Кошелёк: {wallet}, заголовок в строке {header_row}", ""]
+        lines = [f"📄 Лист: {ws.title}", f"Кошелёк: {wallet}, найден в строке {header_row}", ""]
         for r in range(header_row - 1, header_row + 8):
             a = ws.cell(r, 1).value
             b = ws.cell(r, 2).value
@@ -501,7 +516,8 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
             d = ws.cell(r, 4).value
             lines.append(f"Row {r}: A={a!r} B={b!r} C={c!r} D={d!r}")
 
-        next_row = find_next_wallet_row(ws, header_row)
+        labels_row = header_row + 1
+        next_row = find_next_wallet_row(ws, labels_row)
         lines.append("")
         lines.append(f"➡️ find_next_wallet_row вернула: {next_row}")
 
