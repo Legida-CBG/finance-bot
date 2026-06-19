@@ -8,9 +8,9 @@ from datetime import datetime
 import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
 
@@ -22,7 +22,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config from env ────────────────────────────────────────────────────────
-print("PROJECT:", os.environ.get("RAILWAY_PROJECT_ID"), "ENV:", os.environ.get("RAILWAY_ENVIRONMENT_ID"), "SERVICE:", os.environ.get("RAILWAY_SERVICE_ID"))
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 SPREADSHEET_ID    = os.environ["SPREADSHEET_ID"]
@@ -62,6 +61,23 @@ CATEGORIES = [
     "BC Hydro / Комуналка", "YouTube Music", "Other"
 ]
 
+# ─── Wallets ────────────────────────────────────────────────────────────────
+# Row of the wallet's header (e.g. "RBC Credit") on the "BUDGET - <Month> <Year>" sheet.
+# Column A = date+description, Column B = income, Column C = outcome, Column D = Transfer.
+WALLET_HEADER_ROWS = {
+    "RBC Credit":   73,
+    "RBC Checking": 144,
+    "Costco":       178,
+    "Walmart":      213,
+    "Cash":         248,
+}
+WALLET_COL_DATE_DESC = 1  # column A
+WALLET_COL_INCOME    = 2  # column B
+WALLET_COL_OUTCOME   = 3  # column C
+WALLET_COL_TRANSFER  = 4  # column D
+
+WALLET_NAMES = list(WALLET_HEADER_ROWS.keys())
+
 
 def get_sheet():
     """Connect to Google Sheets and return the spreadsheet object."""
@@ -73,14 +89,16 @@ def get_sheet():
 
 
 def get_month_worksheet(spreadsheet):
-    """Find the worksheet for the current month, tolerant of spacing differences
-    (e.g. 'June 2026' vs 'June  2026')."""
+    """Find the daily-tracker worksheet for the current month, tolerant of spacing
+    differences (e.g. 'June 2026' vs 'June  2026'). Skips 'BUDGET - ...' sheets."""
     now = datetime.now()
     month_name = MONTH_NAMES_EN[now.month]
     year = str(now.year)
 
     for ws in spreadsheet.worksheets():
         title = ws.title
+        if "budget" in title.lower():
+            continue
         if month_name.lower() in title.lower() and year in title:
             return ws
 
@@ -90,12 +108,65 @@ def get_month_worksheet(spreadsheet):
     )
 
 
+def get_budget_worksheet(spreadsheet):
+    """Find the 'BUDGET - <Month> <Year>' worksheet for the current month."""
+    now = datetime.now()
+    month_name = MONTH_NAMES_EN[now.month]
+    year = str(now.year)
+
+    for ws in spreadsheet.worksheets():
+        title = ws.title
+        if "budget" in title.lower() and month_name.lower() in title.lower() and year in title:
+            return ws
+
+    raise ValueError(
+        f"Не нашёл лист 'BUDGET - {month_name} {year}'. "
+        f"Создай его на основе шаблона предыдущего месяца."
+    )
+
+
 def col_letter_to_index(col_letter: str) -> int:
     """Convert column letter (e.g. 'AG') to 1-based column index."""
     idx = 0
     for ch in col_letter:
         idx = idx * 26 + (ord(ch.upper()) - ord('A') + 1)
     return idx
+
+
+def find_next_wallet_row(ws, header_row: int) -> int:
+    """Find the first empty data row under a wallet's header row.
+    A row is considered empty if column A (date+description) is blank.
+    Stops scanning after a generous range to avoid runaway loops."""
+    row = header_row + 1
+    max_row = header_row + 300  # generous safety bound
+    while row <= max_row:
+        cell_value = ws.cell(row, WALLET_COL_DATE_DESC).value
+        if not cell_value or not str(cell_value).strip():
+            return row
+        row += 1
+    raise ValueError("Не нашёл свободную строку в блоке кошелька (блок переполнен).")
+
+
+def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
+    """Write an income or outcome entry into the wallet's block on the BUDGET sheet.
+    kind: 'income' or 'outcome'."""
+    if wallet not in WALLET_HEADER_ROWS:
+        raise ValueError(f"Неизвестный кошелёк: {wallet}")
+
+    spreadsheet = get_sheet()
+    ws = get_budget_worksheet(spreadsheet)
+    header_row = WALLET_HEADER_ROWS[wallet]
+    target_row = find_next_wallet_row(ws, header_row)
+
+    date_str = datetime.now().strftime("%d.%m")
+    label = f"{date_str}  {description}"
+
+    col = WALLET_COL_INCOME if kind == "income" else WALLET_COL_OUTCOME
+
+    ws.update_cell(target_row, WALLET_COL_DATE_DESC, label)
+    ws.update_cell(target_row, col, amount)
+
+    return ws.title, target_row
 
 
 # ─── Income handling ─────────────────────────────────────────────────────────
@@ -179,6 +250,18 @@ Return ONLY a JSON object, no markdown, no explanation:
     return json.loads(text)
 
 
+# ─── Wallet keyboard helper ──────────────────────────────────────────────────
+
+def wallet_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    """Build an inline keyboard with one button per wallet.
+    prefix identifies which pending operation this selection belongs to."""
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")]
+        for name in WALLET_NAMES
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 # ─── Telegram handlers ────────────────────────────────────────────────────────
 
 SALARY_PATTERN = re.compile(r"(?i)^\s*зарплата\s*([123])\s*$")
@@ -201,7 +284,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *Зарплата 1 4500* — то же самое одним сообщением\n"
         "• *Бонус 300* — запишет бонус\n"
         "• *Groceries 45.50* — запишет расход\n"
-        "• 📸 Фото чека — распознает и запишет расход",
+        "• 📸 Фото чека — распознает и запишет расход\n\n"
+        "После записи дохода я спрошу, на какой кошелёк он пришёл.",
         parse_mode="Markdown"
     )
 
@@ -219,8 +303,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(amount_str.replace(",", "."))
         sheet_name, row = write_salary(salary_number, amount)
         context.user_data.pop("pending_salary", None)
+
+        # Stash the pending wallet-income operation and ask which wallet
+        context.user_data["pending_wallet_op"] = {
+            "kind": "income",
+            "amount": amount,
+            "description": f"Зарплата {salary_number}",
+        }
         await update.message.reply_text(
-            f"✅ Зарплата {salary_number}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}"
+            f"✅ Зарплата {salary_number}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}\n\n"
+            f"На какой кошелёк пришли деньги?",
+            reply_markup=wallet_keyboard("walletop")
         )
         return
 
@@ -240,8 +333,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = float(m.group(1).replace(",", "."))
             sheet_name, row = write_salary(pending, amount)
             context.user_data.pop("pending_salary", None)
+
+            context.user_data["pending_wallet_op"] = {
+                "kind": "income",
+                "amount": amount,
+                "description": f"Зарплата {pending}",
+            }
             await update.message.reply_text(
-                f"✅ Зарплата {pending}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}"
+                f"✅ Зарплата {pending}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}\n\n"
+                f"На какой кошелёк пришли деньги?",
+                reply_markup=wallet_keyboard("walletop")
             )
             return
         else:
@@ -253,7 +354,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if m:
         amount = float(m.group(1).replace(",", "."))
         sheet_name = write_bonus(amount)
-        await update.message.reply_text(f"✅ Бонус: ${amount:,.2f}\n📄 {sheet_name}")
+
+        context.user_data["pending_wallet_op"] = {
+            "kind": "income",
+            "amount": amount,
+            "description": "Бонус",
+        }
+        await update.message.reply_text(
+            f"✅ Бонус: ${amount:,.2f}\n📄 {sheet_name}\n\n"
+            f"На какой кошелёк пришли деньги?",
+            reply_markup=wallet_keyboard("walletop")
+        )
         return
 
     # 5) Generic expense: "Groceries 45.50"
@@ -278,6 +389,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Не понял. Примеры:\n*Зарплата 1*, *Groceries 45.50*, или фото чека 📸",
         parse_mode="Markdown"
     )
+
+
+async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the inline-keyboard wallet selection for a pending income/outcome op."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    try:
+        prefix, wallet = query.data.split("|", 1)
+    except ValueError:
+        return
+
+    if prefix != "walletop":
+        return
+
+    op = context.user_data.pop("pending_wallet_op", None)
+    if op is None:
+        await query.edit_message_text("⚠️ Не нашёл операцию для записи (возможно, бот перезапускался). Повтори ввод.")
+        return
+
+    try:
+        sheet_name, row = write_wallet_entry(
+            wallet=wallet,
+            kind=op["kind"],
+            amount=op["amount"],
+            description=op["description"],
+        )
+        kind_label = "Доход" if op["kind"] == "income" else "Расход"
+        await query.edit_message_text(
+            f"✅ {kind_label} ${op['amount']:,.2f} записан в кошелёк *{wallet}*\n"
+            f"📄 {sheet_name}, строка {row}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка записи в кошелёк: {e}")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -345,6 +494,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started!")
