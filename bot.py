@@ -22,6 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config from env ────────────────────────────────────────────────────────
+print("ENV KEYS:", list(os.environ.keys()))
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 SPREADSHEET_ID    = os.environ["SPREADSHEET_ID"]
