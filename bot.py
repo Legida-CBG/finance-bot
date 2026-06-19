@@ -67,9 +67,9 @@ CATEGORIES = [
 WALLET_HEADER_ROWS = {
     "RBC Credit":   73,
     "RBC Checking": 144,
-    "Costco":       178,
-    "Walmart":      213,
-    "Cash":         248,
+    "Costco":       179,
+    "Walmart":      214,
+    "Cash":         249,
 }
 WALLET_COL_DATE_DESC = 1  # column A
 WALLET_COL_INCOME    = 2  # column B
@@ -147,6 +147,28 @@ def find_next_wallet_row(ws, header_row: int) -> int:
     raise ValueError("Не нашёл свободную строку в блоке кошелька (блок переполнен).")
 
 
+def verify_wallet_block(ws, wallet: str, header_row: int):
+    """Safety check: confirm the header_row actually contains this wallet's name
+    in column A and that the next row has the income/outcome/Transfer labels.
+    Raises if the sheet structure doesn't match what we expect, instead of
+    silently writing into the wrong place."""
+    name_cell = (ws.cell(header_row, WALLET_COL_DATE_DESC).value or "").strip()
+    if name_cell.lower() != wallet.lower():
+        raise ValueError(
+            f"Структура листа изменилась: ожидал '{wallet}' в строке {header_row}, "
+            f"но нашёл '{name_cell}'. Запись отменена, ничего не испорчено."
+        )
+
+    labels_row = header_row + 1
+    income_label = (ws.cell(labels_row, WALLET_COL_INCOME).value or "").strip().lower()
+    outcome_label = (ws.cell(labels_row, WALLET_COL_OUTCOME).value or "").strip().lower()
+    if "income" not in income_label or "outcome" not in outcome_label:
+        raise ValueError(
+            f"Структура листа изменилась: в строке {labels_row} не нашёл "
+            f"income/outcome. Запись отменена, ничего не испорчено."
+        )
+
+
 def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     """Write an income or outcome entry into the wallet's block on the BUDGET sheet.
     kind: 'income' or 'outcome'."""
@@ -156,7 +178,12 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     spreadsheet = get_sheet()
     ws = get_budget_worksheet(spreadsheet)
     header_row = WALLET_HEADER_ROWS[wallet]
-    target_row = find_next_wallet_row(ws, header_row)
+
+    verify_wallet_block(ws, wallet, header_row)
+
+    # Data rows start right after the income/outcome/Transfer label row
+    labels_row = header_row + 1
+    target_row = find_next_wallet_row(ws, labels_row)
 
     date_str = datetime.now().strftime("%d.%m")
     label = f"{date_str}  {description}"
@@ -452,6 +479,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Не смог разобрать чек: {e}")
 
 
+async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic: dump raw cell contents around a wallet block.
+    Usage: /debugwallet RBC Checking"""
+    if not check_access(update):
+        return
+
+    args_text = update.message.text.partition(" ")[2].strip()
+    wallet = args_text if args_text in WALLET_HEADER_ROWS else "RBC Checking"
+
+    try:
+        spreadsheet = get_sheet()
+        ws = get_budget_worksheet(spreadsheet)
+        header_row = WALLET_HEADER_ROWS[wallet]
+
+        lines = [f"📄 Лист: {ws.title}", f"Кошелёк: {wallet}, заголовок в строке {header_row}", ""]
+        for r in range(header_row - 1, header_row + 8):
+            a = ws.cell(r, 1).value
+            b = ws.cell(r, 2).value
+            c = ws.cell(r, 3).value
+            d = ws.cell(r, 4).value
+            lines.append(f"Row {r}: A={a!r} B={b!r} C={c!r} D={d!r}")
+
+        next_row = find_next_wallet_row(ws, header_row)
+        lines.append("")
+        lines.append(f"➡️ find_next_wallet_row вернула: {next_row}")
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+
+
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update):
         return
@@ -493,6 +551,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", handle_status))
+    app.add_handler(CommandHandler("debugwallet", handle_debug_wallet))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
