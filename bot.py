@@ -185,13 +185,17 @@ def verify_wallet_labels(ws, header_row: int):
 
 
 def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
-    """Write an income or outcome entry into the wallet's block on the BUDGET sheet.
+    """Write an income or outcome entry into the wallet's block on the current
+    month's worksheet (e.g. 'June 2026'). The 'BUDGET - <Month> <Year>' sheet
+    pulls its wallet totals via formulas FROM this sheet, so we must never
+    write directly into BUDGET — that would either get overwritten or break
+    the formulas there.
     kind: 'income' or 'outcome'."""
     if wallet not in WALLET_NAMES:
         raise ValueError(f"Неизвестный кошелёк: {wallet}")
 
     spreadsheet = get_sheet()
-    ws = get_budget_worksheet(spreadsheet)
+    ws = get_month_worksheet(spreadsheet)
     header_row = find_wallet_header_row(ws, wallet)
 
     verify_wallet_labels(ws, header_row)
@@ -505,7 +509,7 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         spreadsheet = get_sheet()
-        ws = get_budget_worksheet(spreadsheet)
+        ws = get_month_worksheet(spreadsheet)
         header_row = find_wallet_header_row(ws, wallet)
 
         lines = [f"📄 Лист: {ws.title}", f"Кошелёк: {wallet}, найден в строке {header_row}", ""]
