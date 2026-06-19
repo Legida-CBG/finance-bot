@@ -172,24 +172,24 @@ def find_next_wallet_row(ws, header_row: int) -> int:
 
 
 def verify_wallet_labels(ws, header_row: int):
-    """Safety check: confirm the row right after the wallet's name row has the
-    income/outcome/Transfer labels, as a sanity check on sheet structure."""
-    labels_row = header_row + 1
-    income_label = (ws.cell(labels_row, WALLET_COL_INCOME).value or "").strip().lower()
-    outcome_label = (ws.cell(labels_row, WALLET_COL_OUTCOME).value or "").strip().lower()
+    """Safety check: confirm the wallet's header row itself has the
+    income/outcome/Transfer labels in columns B/C/D (same row as the wallet
+    name in column A), as a sanity check on sheet structure."""
+    income_label = (ws.cell(header_row, WALLET_COL_INCOME).value or "").strip().lower()
+    outcome_label = (ws.cell(header_row, WALLET_COL_OUTCOME).value or "").strip().lower()
     if "income" not in income_label or "outcome" not in outcome_label:
         raise ValueError(
-            f"Структура листа изменилась: в строке {labels_row} не нашёл "
-            f"income/outcome. Запись отменена, ничего не испорчено."
+            f"Структура листа изменилась: в строке {header_row} не нашёл "
+            f"income/outcome рядом с именем кошелька. Запись отменена, ничего не испорчено."
         )
 
 
 def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     """Write an income or outcome entry into the wallet's block on the current
-    month's worksheet (e.g. 'June 2026'). The 'BUDGET - <Month> <Year>' sheet
-    pulls its wallet totals via formulas FROM this sheet, so we must never
-    write directly into BUDGET — that would either get overwritten or break
-    the formulas there.
+    month's worksheet (e.g. 'June 2026'). The wallet name and the
+    income/outcome/Transfer column labels live on the SAME row (e.g. row 144:
+    A='RBC Checking', B='income', C='outcome', D='Transfer'); data rows start
+    immediately below that.
     kind: 'income' or 'outcome'."""
     if wallet not in WALLET_NAMES:
         raise ValueError(f"Неизвестный кошелёк: {wallet}")
@@ -200,9 +200,7 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
 
     verify_wallet_labels(ws, header_row)
 
-    # Data rows start right after the income/outcome/Transfer label row
-    labels_row = header_row + 1
-    target_row = find_next_wallet_row(ws, labels_row)
+    target_row = find_next_wallet_row(ws, header_row)
 
     date_str = datetime.now().strftime("%d.%m")
     label = f"{date_str}  {description}"
@@ -520,8 +518,7 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
             d = ws.cell(r, 4).value
             lines.append(f"Row {r}: A={a!r} B={b!r} C={c!r} D={d!r}")
 
-        labels_row = header_row + 1
-        next_row = find_next_wallet_row(ws, labels_row)
+        next_row = find_next_wallet_row(ws, header_row)
         lines.append("")
         lines.append(f"➡️ find_next_wallet_row вернула: {next_row}")
 
