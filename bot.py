@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config from env ────────────────────────────────────────────────────────
-print("ENV KEYS:", list(os.environ.keys()))
+print("PROJECT:", os.environ.get("RAILWAY_PROJECT_ID"), "ENV:", os.environ.get("RAILWAY_ENVIRONMENT_ID"), "SERVICE:", os.environ.get("RAILWAY_SERVICE_ID"))
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 SPREADSHEET_ID    = os.environ["SPREADSHEET_ID"]
