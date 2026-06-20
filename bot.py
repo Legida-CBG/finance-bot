@@ -121,7 +121,7 @@ def get_month_worksheet(spreadsheet):
 
     for ws in spreadsheet.worksheets():
         title = ws.title
-        if "budget" in title.lower():
+        if "budget" in title.lower() or "finance" in title.lower():
             continue
         if month_name.lower() in title.lower() and year in title:
             return ws
@@ -133,18 +133,22 @@ def get_month_worksheet(spreadsheet):
 
 
 def get_budget_worksheet(spreadsheet):
-    """Find the 'BUDGET - <Month> <Year>' worksheet for the current month."""
+    """Find the 'BUDGET - <Month> <Year>' (now possibly renamed to
+    'FINANCE - <Month> <Year>') worksheet for the current month.
+    Currently unused by the bot's write path — kept for future reference/reads."""
     now = datetime.now()
     month_name = MONTH_NAMES_EN[now.month]
     year = str(now.year)
 
     for ws in spreadsheet.worksheets():
         title = ws.title
-        if "budget" in title.lower() and month_name.lower() in title.lower() and year in title:
+        title_lower = title.lower()
+        if ("budget" in title_lower or "finance" in title_lower) and \
+           month_name.lower() in title_lower and year in title:
             return ws
 
     raise ValueError(
-        f"Не нашёл лист 'BUDGET - {month_name} {year}'. "
+        f"Не нашёл лист 'BUDGET/FINANCE - {month_name} {year}'. "
         f"Создай его на основе шаблона предыдущего месяца."
     )
 
