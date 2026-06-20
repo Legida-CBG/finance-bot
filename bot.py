@@ -500,6 +500,67 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Не смог разобрать чек: {e}")
 
 
+async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic: scan columns K onward on the month sheet for a named expense
+    category block (e.g. 'Groceries') and dump raw cell contents around it.
+    Usage: /debugcategory Groceries"""
+    if not check_access(update):
+        return
+
+    category = update.message.text.partition(" ")[2].strip()
+    if not category:
+        await update.message.reply_text("Использование: /debugcategory Groceries")
+        return
+
+    try:
+        spreadsheet = get_sheet()
+        ws = get_month_worksheet(spreadsheet)
+
+        # Scan columns K (11) through Z (26) for a cell matching the category name
+        found_row = None
+        found_col = None
+        for col in range(11, 27):
+            col_values = ws.col_values(col)
+            for idx, val in enumerate(col_values, start=1):
+                if (val or "").strip().lower() == category.lower():
+                    found_row = idx
+                    found_col = col
+                    break
+            if found_row:
+                break
+
+        if not found_row:
+            await update.message.reply_text(
+                f"❌ Не нашёл категорию '{category}' в колонках K-Z на листе '{ws.title}'."
+            )
+            return
+
+        def col_idx_to_letter(idx):
+            letters = ""
+            while idx > 0:
+                idx, rem = divmod(idx - 1, 26)
+                letters = chr(65 + rem) + letters
+            return letters
+
+        col_letter = col_idx_to_letter(found_col)
+        lines = [
+            f"📄 Лист: {ws.title}",
+            f"Категория: {category}, найдена в {col_letter}{found_row}",
+            "",
+        ]
+        for r in range(found_row - 1, found_row + 10):
+            vals = []
+            for c in range(found_col, found_col + 2):
+                cl = col_idx_to_letter(c)
+                v = ws.cell(r, c).value
+                vals.append(f"{cl}{r}={v!r}")
+            lines.append(" ".join(vals))
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+
+
 async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Diagnostic: dump raw cell contents around a wallet block.
     Usage: /debugwallet RBC Checking"""
@@ -573,6 +634,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("debugwallet", handle_debug_wallet))
+    app.add_handler(CommandHandler("debugcategory", handle_debug_category))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
