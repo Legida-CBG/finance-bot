@@ -68,6 +68,7 @@ ROW_BASED_CATEGORIES = [
     "Sauna", "Audiobooks", "Vehicle loan", "Car Wash", "Charity", "Gifts",
     "Tim Hortons", "Air Tickets", "Hotels", "Food in travel",
     "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
+    "Parking",
 ]
 
 # Formerly: fixed monthly-payment categories written as a single cumulative
