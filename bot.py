@@ -344,7 +344,17 @@ def write_row_category_entry(category: str, amount: float, description: str):
     ws.update_cell(target_row, header_col, label)
     ws.update_cell(target_row, header_col + 1, amount)
 
-    return ws.title, target_row
+    return ws.title, target_row, header_col
+
+
+def append_comment_to_cell(sheet_title: str, row: int, col: int, comment: str):
+    """Append a user comment to an already-written description cell, e.g.
+    turning 'DD.MM. Groceries' into 'DD.MM. Groceries [comment]'."""
+    spreadsheet = get_sheet()
+    ws = spreadsheet.worksheet(sheet_title)
+    existing = ws.cell(row, col).value or ""
+    new_value = f"{existing} [{comment}]" if existing else f"[{comment}]"
+    ws.update_cell(row, col, new_value)
 
 
 def write_fixed_category_entry(category: str, amount: float):
@@ -475,6 +485,11 @@ def wallet_keyboard(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def comment_skip_keyboard() -> InlineKeyboardMarkup:
+    """Single button to skip adding a comment to the just-recorded entry."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Без комментария", callback_data="skipcomment")]])
+
+
 # ─── Telegram handlers ────────────────────────────────────────────────────────
 
 def match_category(text: str):
@@ -520,13 +535,14 @@ def match_income_category(text: str):
 def write_expense_to_category(category: str, amount: float, description: str):
     """Route an expense to the correct sheet/structure based on whether the
     category is row-based (June sheet) or fixed (FINANCE sheet). Returns
-    (sheet_title, location) for confirmation messages."""
+    (sheet_title, location_label, row, col) — row/col are None for the
+    FINANCE-sheet path since comments aren't supported there."""
     if category in ROW_BASED_CATEGORIES:
-        sheet_name, row = write_row_category_entry(category, amount, description)
-        return sheet_name, f"строка {row}"
+        sheet_name, row, col = write_row_category_entry(category, amount, description)
+        return sheet_name, f"строка {row}", row, col
     elif category in FIXED_CATEGORIES:
         sheet_name, row = write_fixed_category_entry(category, amount)
-        return sheet_name, f"строка {row} (Actual cost)"
+        return sheet_name, f"строка {row} (Actual cost)", None, None
     else:
         raise ValueError(f"Неизвестная категория: {category}")
 
@@ -578,6 +594,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    # 0) If we're waiting for a comment on the last recorded entry, treat
+    # this message as that comment rather than trying to parse a new operation.
+    pending_comment = context.user_data.pop("pending_comment", None)
+    if pending_comment is not None:
+        try:
+            append_comment_to_cell(
+                pending_comment["sheet"], pending_comment["row"], pending_comment["col"], text
+            )
+            await update.message.reply_text("✅ Комментарий добавлен.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Не смог записать комментарий: {e}")
+        return
+
     # 1) Income: "Зарплата 4500", "Бонус 300", "Self employed 200", "Points RBC 50"
     m = INCOME_PATTERN.match(text)
     if m:
@@ -591,7 +620,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             try:
-                sheet_name, row = write_row_category_entry(income_category, amount, income_category)
+                sheet_name, row, col = write_row_category_entry(income_category, amount, income_category)
             except Exception as e:
                 await update.message.reply_text(f"❌ Ошибка записи: {e}")
                 return
@@ -600,6 +629,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "kind": "income",
                 "amount": amount,
                 "description": income_category,
+                "entry_sheet": sheet_name,
+                "entry_row": row,
+                "entry_col": col,
             }
             await update.message.reply_text(
                 f"✅ {income_category}: ${amount:,.2f}\n📄 {sheet_name}, строка {row}\n\n"
@@ -634,7 +666,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            sheet_name, location = write_expense_to_category(category, amount, description_raw)
+            sheet_name, location, row, col = write_expense_to_category(category, amount, description_raw)
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка записи: {e}")
             return
@@ -643,6 +675,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "kind": "outcome",
             "amount": amount,
             "description": category,
+            "entry_sheet": sheet_name,
+            "entry_row": row,
+            "entry_col": col,
         }
         await update.message.reply_text(
             f"✅ Расход: {category} — ${amount:,.2f}\n📄 {sheet_name}, {location}\n\n"
@@ -691,8 +726,33 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📄 {sheet_name}, строка {row}",
             parse_mode="Markdown"
         )
+
+        # If we know exactly which cell holds the category-block entry,
+        # offer to attach a free-text comment to it.
+        if op.get("entry_sheet") and op.get("entry_row") and op.get("entry_col"):
+            context.user_data["pending_comment"] = {
+                "sheet": op["entry_sheet"],
+                "row": op["entry_row"],
+                "col": op["entry_col"],
+            }
+            await query.message.reply_text(
+                "Добавить комментарий к этой записи?",
+                reply_markup=comment_skip_keyboard()
+            )
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка записи в кошелёк: {e}")
+
+
+async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the 'Без комментария' button — just clears the pending comment slot."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    context.user_data.pop("pending_comment", None)
+    await query.edit_message_text("Без комментария.")
 
 
 async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -718,7 +778,7 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     try:
-        sheet_name, location = write_expense_to_category(
+        sheet_name, location, row, col = write_expense_to_category(
             category, pending["amount"], pending["description"]
         )
     except Exception as e:
@@ -729,6 +789,9 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
         "kind": "outcome",
         "amount": pending["amount"],
         "description": category,
+        "entry_sheet": sheet_name,
+        "entry_row": row,
+        "entry_col": col,
     }
     await query.edit_message_text(
         f"✅ Расход: {category} — ${pending['amount']:,.2f}\n📄 {sheet_name}, {location}",
@@ -768,12 +831,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sheet_name, location = write_expense_to_category(category, amount, description)
+        sheet_name, location, row, col = write_expense_to_category(category, amount, description)
 
         context.user_data["pending_wallet_op"] = {
             "kind": "outcome",
             "amount": amount,
             "description": category,
+            "entry_sheet": sheet_name,
+            "entry_row": row,
+            "entry_col": col,
         }
         await update.message.reply_text(
             f"✅ Расход: {category} ({description}) — ${amount:,.2f}\n"
@@ -1048,6 +1114,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
     app.add_handler(CallbackQueryHandler(handle_category_choice, pattern=r"^expensecat\|"))
+    app.add_handler(CallbackQueryHandler(handle_skip_comment, pattern=r"^skipcomment$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started!")
