@@ -52,14 +52,30 @@ EXPENSE_DATE_COL = "AE"
 EXPENSE_DESC_COL = "AF"
 EXPENSE_AMOUNT_COL = "AG"
 
-CATEGORIES = [
-    "Groceries", "GAS / Бензин", "Health", "Sport", "Hair Cut",
-    "Vehicle", "Tim Horton's", "Sauna", "Alcohol", "Phone",
-    "Helping people / Благотворительность", "Clothes", "Travels",
-    "Taxes & fees", "Restaurant / Dining out", "Netflix",
-    "Audiobook", "Car loan", "Rent / Аренда", "Car insurance",
-    "BC Hydro / Комуналка", "YouTube Music", "Other"
+# Expense categories that accumulate row-by-row on the month sheet (e.g. 'June  2026'),
+# in the same style as the wallet blocks: a header cell with the category name,
+# then date+description / amount rows below, with a 'Total' row further down.
+ROW_BASED_CATEGORIES = [
+    "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurants", "Bowling",
+    "GIM", "Skiing", "Medication", "Hair Cut", "Dining Out", "Clothing",
+    "Sauna", "Audiobooks", "Vehicle loan", "Car Wash", "Charity", "Gifts",
+    "Tim Hortons", "Air Tickets", "Hotels", "Food in travel",
 ]
+
+# Fixed monthly-payment categories that live as a single cell on the
+# 'FINANCE - <Month> <Year>' sheet, in a Category/Projected cost/Actual cost
+# table (column B = category name, column D = Actual cost). The bot ADDS to
+# whatever is already in column D rather than overwriting it.
+FIXED_CATEGORIES = [
+    "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
+]
+
+ALL_EXPENSE_CATEGORIES = ROW_BASED_CATEGORIES + FIXED_CATEGORIES
+
+# Column layout for the fixed-payment table on the FINANCE sheet
+FIXED_COL_CATEGORY = 2       # column B
+FIXED_COL_PROJECTED = 3      # column C ("Projected cost") — never written by the bot
+FIXED_COL_ACTUAL = 4         # column D ("Actual cost") — bot adds to this
 
 # ─── Wallets ────────────────────────────────────────────────────────────────
 # Column A = wallet name (header row) / date+description (data rows)
@@ -217,6 +233,108 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     return ws.title, target_row
 
 
+# ─── Expense category handling ───────────────────────────────────────────────
+
+# Cache of {sheet_title: {category_name: (header_row, header_col)}} to avoid
+# re-scanning a wide column range on every write within the same process.
+_category_cell_cache: dict = {}
+
+
+def find_category_header_row(ws, category: str):
+    """Find the (row, col) of a row-based expense category header
+    (e.g. 'Groceries') by scanning columns K (11) through Z (26).
+    Returns (row, col)."""
+    cache_key = ws.title
+    cached = _category_cell_cache.get(cache_key, {})
+    if category in cached:
+        row, col = cached[category]
+        cell_val = (ws.cell(row, col).value or "").strip()
+        if cell_val.lower() == category.lower():
+            return row, col
+
+    for col in range(11, 27):
+        col_values = ws.col_values(col)
+        for idx, val in enumerate(col_values, start=1):
+            if (val or "").strip().lower() == category.lower():
+                _category_cell_cache.setdefault(cache_key, {})[category] = (idx, col)
+                return idx, col
+
+    raise ValueError(
+        f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки K-Z)."
+    )
+
+
+def find_next_category_row(ws, header_row: int, col: int) -> int:
+    """Find the first empty data row under a category header, scanning the
+    description column (same column as the header)."""
+    row = header_row + 1
+    max_row = header_row + 100  # generous safety bound
+    while row <= max_row:
+        cell_value = ws.cell(row, col).value
+        if not cell_value or not str(cell_value).strip():
+            return row
+        row += 1
+    raise ValueError("Не нашёл свободную строку в блоке категории (блок переполнен).")
+
+
+def write_row_category_entry(category: str, amount: float, description: str):
+    """Write an expense entry into a row-based category block on the current
+    month's worksheet (e.g. 'June 2026'). Mirrors the wallet entry format:
+    description column gets 'DD.MM. description', amount column (next column
+    over) gets the amount."""
+    if category not in ROW_BASED_CATEGORIES:
+        raise ValueError(f"Неизвестная построчная категория: {category}")
+
+    spreadsheet = get_sheet()
+    ws = get_month_worksheet(spreadsheet)
+    header_row, header_col = find_category_header_row(ws, category)
+
+    target_row = find_next_category_row(ws, header_row, header_col)
+
+    date_str = datetime.now().strftime("%d.%m.")
+    label = f"{date_str} {description}"
+
+    ws.update_cell(target_row, header_col, label)
+    ws.update_cell(target_row, header_col + 1, amount)
+
+    return ws.title, target_row
+
+
+def write_fixed_category_entry(category: str, amount: float):
+    """Add `amount` to the 'Actual cost' cell (column D) of a fixed monthly
+    payment category (e.g. 'Rent') on the 'FINANCE - <Month> <Year>' sheet.
+    Adds to whatever is already there rather than overwriting."""
+    if category not in FIXED_CATEGORIES:
+        raise ValueError(f"Неизвестная фиксированная категория: {category}")
+
+    spreadsheet = get_sheet()
+    ws = get_budget_worksheet(spreadsheet)
+
+    found_row = None
+    col_values = ws.col_values(FIXED_COL_CATEGORY)
+    for idx, val in enumerate(col_values, start=1):
+        if (val or "").strip().lower() == category.lower():
+            found_row = idx
+            break
+
+    if found_row is None:
+        raise ValueError(
+            f"Не нашёл категорию '{category}' в колонке B на листе '{ws.title}'."
+        )
+
+    existing_raw = ws.cell(found_row, FIXED_COL_ACTUAL).value or "0"
+    existing_clean = str(existing_raw).replace("$", "").strip().replace(",", ".")
+    try:
+        existing_amount = float(existing_clean) if existing_clean else 0.0
+    except ValueError:
+        existing_amount = 0.0
+
+    new_amount = existing_amount + amount
+    ws.update_cell(found_row, FIXED_COL_ACTUAL, new_amount)
+
+    return ws.title, found_row
+
+
 # ─── Income handling ─────────────────────────────────────────────────────────
 
 def write_salary(salary_number: str, amount: float):
@@ -271,7 +389,7 @@ def analyze_receipt_with_claude(image_bytes: bytes) -> dict:
     """Send receipt image to Claude and get structured expense data."""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-    categories_str = "\n".join(f"- {c}" for c in CATEGORIES)
+    categories_str = "\n".join(f"- {c}" for c in ALL_EXPENSE_CATEGORIES)
 
     prompt = f"""You are a financial assistant analyzing a receipt photo.
 
@@ -311,6 +429,40 @@ def wallet_keyboard(prefix: str) -> InlineKeyboardMarkup:
 
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
+
+def match_category(text: str):
+    """Match free-text category input to a known category name (case-insensitive,
+    exact match only — no fuzzy matching to avoid silently picking the wrong
+    category). Returns the canonical category name, or None if no match."""
+    text_lower = text.strip().lower()
+    for cat in ALL_EXPENSE_CATEGORIES:
+        if cat.lower() == text_lower:
+            return cat
+    return None
+
+
+def write_expense_to_category(category: str, amount: float, description: str):
+    """Route an expense to the correct sheet/structure based on whether the
+    category is row-based (June sheet) or fixed (FINANCE sheet). Returns
+    (sheet_title, location) for confirmation messages."""
+    if category in ROW_BASED_CATEGORIES:
+        sheet_name, row = write_row_category_entry(category, amount, description)
+        return sheet_name, f"строка {row}"
+    elif category in FIXED_CATEGORIES:
+        sheet_name, row = write_fixed_category_entry(category, amount)
+        return sheet_name, f"строка {row} (Actual cost)"
+    else:
+        raise ValueError(f"Неизвестная категория: {category}")
+
+
+def category_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    """Build an inline keyboard with one button per expense category."""
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")]
+        for name in ALL_EXPENSE_CATEGORIES
+    ]
+    return InlineKeyboardMarkup(buttons)
+
 
 SALARY_PATTERN = re.compile(r"(?i)^\s*зарплата\s*([123])\s*$")
 SALARY_WITH_AMOUNT_PATTERN = re.compile(r"(?i)^\s*зарплата\s*([123])\s+([\d.,]+)\s*$")
@@ -415,22 +567,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 5) Generic expense: "Groceries 45.50"
+    # 5) Expense: "Groceries 45.50" — match against known categories
     m = EXPENSE_PATTERN.match(text)
     if m:
-        description, amount_str = m.group(1).strip(), m.group(2)
+        description_raw, amount_str = m.group(1).strip(), m.group(2)
         try:
             amount = float(amount_str.replace(",", "."))
         except ValueError:
             await update.message.reply_text("❌ Не понял сумму. Формат: Категория 45.50")
             return
-        try:
-            sheet_name, row = write_expense(description, amount)
+
+        category = match_category(description_raw)
+        if category is None:
+            # Unknown category — ask the user to pick one via buttons,
+            # remembering the amount/description for after the pick.
+            context.user_data["pending_expense_category_pick"] = {
+                "amount": amount,
+                "description": description_raw,
+            }
             await update.message.reply_text(
-                f"✅ Расход: {description} — ${amount:,.2f}\n📄 {sheet_name}, строка {row}"
+                f"Не узнал категорию '{description_raw}'. Выбери из списка:",
+                reply_markup=category_keyboard("expensecat")
             )
+            return
+
+        try:
+            sheet_name, location = write_expense_to_category(category, amount, description_raw)
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка записи: {e}")
+            return
+
+        context.user_data["pending_wallet_op"] = {
+            "kind": "outcome",
+            "amount": amount,
+            "description": category,
+        }
+        await update.message.reply_text(
+            f"✅ Расход: {category} — ${amount:,.2f}\n📄 {sheet_name}, {location}\n\n"
+            f"С какого кошелька списать?",
+            reply_markup=wallet_keyboard("walletop")
+        )
         return
 
     await update.message.reply_text(
@@ -477,6 +653,50 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(f"❌ Ошибка записи в кошелёк: {e}")
 
 
+async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the inline-keyboard category selection for an expense whose
+    typed category didn't match a known category name."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    try:
+        prefix, category = query.data.split("|", 1)
+    except ValueError:
+        return
+
+    if prefix != "expensecat":
+        return
+
+    pending = context.user_data.pop("pending_expense_category_pick", None)
+    if pending is None:
+        await query.edit_message_text("⚠️ Не нашёл операцию для записи (возможно, бот перезапускался). Повтори ввод.")
+        return
+
+    try:
+        sheet_name, location = write_expense_to_category(
+            category, pending["amount"], pending["description"]
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка записи: {e}")
+        return
+
+    context.user_data["pending_wallet_op"] = {
+        "kind": "outcome",
+        "amount": pending["amount"],
+        "description": category,
+    }
+    await query.edit_message_text(
+        f"✅ Расход: {category} — ${pending['amount']:,.2f}\n📄 {sheet_name}, {location}",
+    )
+    await query.message.reply_text(
+        "С какого кошелька списать?",
+        reply_markup=wallet_keyboard("walletop")
+    )
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update):
         return
@@ -490,11 +710,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = analyze_receipt_with_claude(bytes(image_bytes))
         description = data["description"]
         amount = float(data["amount"])
-        category = data.get("category", "Other")
-        full_desc = f"{category}: {description}"
-        sheet_name, row = write_expense(full_desc, amount)
+        raw_category = data.get("category", "")
+        category = match_category(raw_category)
+
+        if category is None:
+            # Claude returned something outside our known list — ask the user.
+            context.user_data["pending_expense_category_pick"] = {
+                "amount": amount,
+                "description": description,
+            }
+            await update.message.reply_text(
+                f"Чек прочитан: {description} — ${amount:,.2f}\n"
+                f"Не узнал категорию '{raw_category}'. Выбери из списка:",
+                reply_markup=category_keyboard("expensecat")
+            )
+            return
+
+        sheet_name, location = write_expense_to_category(category, amount, description)
+
+        context.user_data["pending_wallet_op"] = {
+            "kind": "outcome",
+            "amount": amount,
+            "description": category,
+        }
         await update.message.reply_text(
-            f"✅ Записал: {full_desc} — ${amount:,.2f}\n📄 {sheet_name}, строка {row}"
+            f"✅ Расход: {category} ({description}) — ${amount:,.2f}\n"
+            f"📄 {sheet_name}, {location}\n\n"
+            f"С какого кошелька списать?",
+            reply_markup=wallet_keyboard("walletop")
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Не смог разобрать чек: {e}")
@@ -699,6 +942,7 @@ def main():
     app.add_handler(CommandHandler("debugfixed", handle_debug_fixed))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
+    app.add_handler(CallbackQueryHandler(handle_category_choice, pattern=r"^expensecat\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started!")
