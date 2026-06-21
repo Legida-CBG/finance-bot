@@ -74,7 +74,7 @@ FIXED_CATEGORIES = [
 # month sheet (e.g. 'June  2026'), same style as expense categories: a header
 # cell with the category name, then date+description / amount rows below,
 # with a 'Total' row further down (which is then pulled by formula elsewhere).
-INCOME_CATEGORIES = ["Зарплата", "Bonuses", "Self employed", "Points RBC"]
+INCOME_CATEGORIES = ["Зарплата", "Points RBC", "Бонус", "Инвойс"]
 
 ALL_EXPENSE_CATEGORIES = ROW_BASED_CATEGORIES + FIXED_CATEGORIES
 
@@ -484,12 +484,14 @@ def match_category(text: str):
 INCOME_CATEGORY_ALIASES = {
     "зарплата": "Зарплата",
     "salary": "Зарплата",
-    "бонус": "Bonuses",
-    "бонусы": "Bonuses",
-    "bonus": "Bonuses",
-    "bonuses": "Bonuses",
-    "self employed": "Self employed",
-    "самозанятость": "Self employed",
+    "бонус": "Бонус",
+    "бонусы": "Бонус",
+    "bonus": "Бонус",
+    "bonuses": "Бонус",
+    "инвойс": "Инвойс",
+    "invoice": "Инвойс",
+    "self employed": "Инвойс",
+    "самозанятость": "Инвойс",
     "points rbc": "Points RBC",
     "поинты": "Points RBC",
     "points": "Points RBC",
