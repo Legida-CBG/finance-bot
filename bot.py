@@ -249,25 +249,49 @@ _category_cell_cache: dict = {}
 def find_category_header_row(ws, category: str):
     """Find the (row, col) of a row-based category header (expense or income,
     e.g. 'Groceries' or 'Зарплата') by scanning columns A (1) through Z (26).
+
+    Some sheets also have a SUMMARY table listing category names next to
+    their totals (e.g. an 'INCOM' overview block) — those rows have a value
+    already in the adjacent cell. We only want the category's OWN block
+    header, which is followed by an empty cell (just like 'Groceries' has
+    nothing in the cell next to it). So among all text matches, we pick the
+    first one whose adjacent cell (same row, next column) is empty.
+
     Returns (row, col)."""
     cache_key = ws.title
     cached = _category_cell_cache.get(cache_key, {})
     if category in cached:
         row, col = cached[category]
         cell_val = (ws.cell(row, col).value or "").strip()
-        if cell_val.lower() == category.lower():
+        adjacent_val = ws.cell(row, col + 1).value
+        if cell_val.lower() == category.lower() and not (adjacent_val and str(adjacent_val).strip()):
             return row, col
 
+    candidates = []
     for col in range(1, 27):
         col_values = ws.col_values(col)
         for idx, val in enumerate(col_values, start=1):
             if (val or "").strip().lower() == category.lower():
-                _category_cell_cache.setdefault(cache_key, {})[category] = (idx, col)
-                return idx, col
+                candidates.append((idx, col))
 
-    raise ValueError(
-        f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки A-Z)."
-    )
+    if not candidates:
+        raise ValueError(
+            f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки A-Z)."
+        )
+
+    # Prefer a match whose adjacent cell is empty (own block header), not a
+    # summary-table row that already has a value/total next to it.
+    for row, col in candidates:
+        adjacent_val = ws.cell(row, col + 1).value
+        if not (adjacent_val and str(adjacent_val).strip()):
+            _category_cell_cache.setdefault(cache_key, {})[category] = (row, col)
+            return row, col
+
+    # No candidate had an empty adjacent cell — fall back to the first match
+    # rather than failing outright, but this is unexpected.
+    row, col = candidates[0]
+    _category_cell_cache.setdefault(cache_key, {})[category] = (row, col)
+    return row, col
 
 
 def find_next_category_row(ws, header_row: int, col: int) -> int:
@@ -743,11 +767,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Diagnostic: scan the month sheet for the INCOM/salary block (Зарплата 1,
-    Зарплата 2, Bonuses, etc.) and dump raw cell contents around it.
-    Usage: /debugincome"""
+    """Diagnostic: find ALL occurrences of an income category name (e.g.
+    'Зарплата') on the month sheet, since the sheet has both a summary block
+    listing category names AND each category's own block with the same name.
+    Usage: /debugincome [category name, default 'Зарплата']"""
     if not check_access(update):
         return
+
+    category = update.message.text.partition(" ")[2].strip() or "Зарплата"
 
     try:
         spreadsheet = get_sheet()
@@ -760,38 +787,31 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
                 letters = chr(65 + rem) + letters
             return letters
 
-        # Scan columns A (1) through Z (26) for a cell matching 'Зарплата 1'
-        found_row = None
-        found_col = None
+        matches = []  # list of (row, col)
         for col in range(1, 27):
             col_values = ws.col_values(col)
             for idx, val in enumerate(col_values, start=1):
-                if (val or "").strip().lower().replace(" ", "") == "зарплата1":
-                    found_row = idx
-                    found_col = col
-                    break
-            if found_row:
-                break
+                if (val or "").strip().lower() == category.lower():
+                    matches.append((idx, col))
 
-        if not found_row:
+        if not matches:
             await update.message.reply_text(
-                f"❌ Не нашёл 'Зарплата 1' в колонках A-Z на листе '{ws.title}'."
+                f"❌ Не нашёл '{category}' в колонках A-Z на листе '{ws.title}'."
             )
             return
 
-        col_letter = col_idx_to_letter(found_col)
-        lines = [
-            f"📄 Лист: {ws.title}",
-            f"'Зарплата 1' найдена в {col_letter}{found_row}",
-            "",
-        ]
-        for r in range(found_row - 2, found_row + 8):
-            vals = []
-            for c in range(found_col, found_col + 2):
-                cl = col_idx_to_letter(c)
-                v = ws.cell(r, c).value
-                vals.append(f"{cl}{r}={v!r}")
-            lines.append(" ".join(vals))
+        lines = [f"📄 Лист: {ws.title}", f"Найдено вхождений '{category}': {len(matches)}", ""]
+        for row, col in matches:
+            cl = col_idx_to_letter(col)
+            lines.append(f"--- Совпадение в {cl}{row} ---")
+            for r in range(row - 1, row + 6):
+                vals = []
+                for c in range(col, col + 2):
+                    ccl = col_idx_to_letter(c)
+                    v = ws.cell(r, c).value
+                    vals.append(f"{ccl}{r}={v!r}")
+                lines.append(" ".join(vals))
+            lines.append("")
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
