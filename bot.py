@@ -55,20 +55,27 @@ EXPENSE_AMOUNT_COL = "AG"
 # Expense categories that accumulate row-by-row on the month sheet (e.g. 'June  2026'),
 # in the same style as the wallet blocks: a header cell with the category name,
 # then date+description / amount rows below, with a 'Total' row further down.
+#
+# The 6 "fixed monthly payment" categories (Rent, Phone, BC Hydro, Netflix,
+# YouTube Music, Auto Insurance) used to live only on the FINANCE sheet, but
+# the June 2026 sheet ALSO has real row-based blocks for them (column N/O,
+# same Total-row-above / header / accumulating-data-rows-below pattern as
+# every other category here), confirmed via /debugcategory. As of June 2026
+# they're written here instead, to stop the FINANCE-vs-month-sheet confusion.
 ROW_BASED_CATEGORIES = [
     "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurants", "Bowling",
     "GIM", "Skiing", "Medication", "Hair Cut", "Dining Out", "Clothing",
     "Sauna", "Audiobooks", "Vehicle loan", "Car Wash", "Charity", "Gifts",
     "Tim Hortons", "Air Tickets", "Hotels", "Food in travel",
-]
-
-# Fixed monthly-payment categories that live as a single cell on the
-# 'FINANCE - <Month> <Year>' sheet, in a Category/Projected cost/Actual cost
-# table (column B = category name, column D = Actual cost). The bot ADDS to
-# whatever is already in column D rather than overwriting it.
-FIXED_CATEGORIES = [
     "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
 ]
+
+# Formerly: fixed monthly-payment categories written as a single cumulative
+# cell (column D, "Actual cost") on the 'FINANCE - <Month> <Year>' sheet.
+# As of June 2026 this list is empty and the bot no longer writes to the
+# FINANCE sheet at all — see ROW_BASED_CATEGORIES above. write_fixed_category_entry()
+# is kept below, unused, in case this ever needs to be reverted.
+FIXED_CATEGORIES = []
 
 # Income categories that now accumulate row-by-row in the 'INCOM' block on the
 # month sheet (e.g. 'June  2026'), same style as expense categories: a header
