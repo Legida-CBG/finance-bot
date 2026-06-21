@@ -70,6 +70,12 @@ FIXED_CATEGORIES = [
     "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
 ]
 
+# Income categories that now accumulate row-by-row in the 'INCOM' block on the
+# month sheet (e.g. 'June  2026'), same style as expense categories: a header
+# cell with the category name, then date+description / amount rows below,
+# with a 'Total' row further down (which is then pulled by formula elsewhere).
+INCOME_CATEGORIES = ["Зарплата", "Bonuses", "Self employed", "Points RBC"]
+
 ALL_EXPENSE_CATEGORIES = ROW_BASED_CATEGORIES + FIXED_CATEGORIES
 
 # Column layout for the fixed-payment table on the FINANCE sheet
@@ -241,8 +247,8 @@ _category_cell_cache: dict = {}
 
 
 def find_category_header_row(ws, category: str):
-    """Find the (row, col) of a row-based expense category header
-    (e.g. 'Groceries') by scanning columns K (11) through Z (26).
+    """Find the (row, col) of a row-based category header (expense or income,
+    e.g. 'Groceries' or 'Зарплата') by scanning columns A (1) through Z (26).
     Returns (row, col)."""
     cache_key = ws.title
     cached = _category_cell_cache.get(cache_key, {})
@@ -252,7 +258,7 @@ def find_category_header_row(ws, category: str):
         if cell_val.lower() == category.lower():
             return row, col
 
-    for col in range(11, 27):
+    for col in range(1, 27):
         col_values = ws.col_values(col)
         for idx, val in enumerate(col_values, start=1):
             if (val or "").strip().lower() == category.lower():
@@ -260,7 +266,7 @@ def find_category_header_row(ws, category: str):
                 return idx, col
 
     raise ValueError(
-        f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки K-Z)."
+        f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки A-Z)."
     )
 
 
@@ -278,11 +284,11 @@ def find_next_category_row(ws, header_row: int, col: int) -> int:
 
 
 def write_row_category_entry(category: str, amount: float, description: str):
-    """Write an expense entry into a row-based category block on the current
-    month's worksheet (e.g. 'June 2026'). Mirrors the wallet entry format:
-    description column gets 'DD.MM. description', amount column (next column
-    over) gets the amount."""
-    if category not in ROW_BASED_CATEGORIES:
+    """Write an entry into a row-based category block (expense or income) on
+    the current month's worksheet (e.g. 'June 2026'). Mirrors the wallet
+    entry format: description column gets 'DD.MM. description', amount
+    column (next column over) gets the amount."""
+    if category not in ROW_BASED_CATEGORIES and category not in INCOME_CATEGORIES:
         raise ValueError(f"Неизвестная построчная категория: {category}")
 
     spreadsheet = get_sheet()
@@ -441,6 +447,33 @@ def match_category(text: str):
     return None
 
 
+# Common aliases so the person doesn't have to type the exact sheet label.
+INCOME_CATEGORY_ALIASES = {
+    "зарплата": "Зарплата",
+    "salary": "Зарплата",
+    "бонус": "Bonuses",
+    "бонусы": "Bonuses",
+    "bonus": "Bonuses",
+    "bonuses": "Bonuses",
+    "self employed": "Self employed",
+    "самозанятость": "Self employed",
+    "points rbc": "Points RBC",
+    "поинты": "Points RBC",
+    "points": "Points RBC",
+}
+
+
+def match_income_category(text: str):
+    """Match free-text input to a known income category name, checking exact
+    names first, then common aliases. Returns the canonical category name
+    (as it appears on the sheet), or None if no match."""
+    text_lower = text.strip().lower()
+    for cat in INCOME_CATEGORIES:
+        if cat.lower() == text_lower:
+            return cat
+    return INCOME_CATEGORY_ALIASES.get(text_lower)
+
+
 def write_expense_to_category(category: str, amount: float, description: str):
     """Route an expense to the correct sheet/structure based on whether the
     category is row-based (June sheet) or fixed (FINANCE sheet). Returns
@@ -464,9 +497,16 @@ def category_keyboard(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-SALARY_PATTERN = re.compile(r"(?i)^\s*зарплата\s*([123])\s*$")
-SALARY_WITH_AMOUNT_PATTERN = re.compile(r"(?i)^\s*зарплата\s*([123])\s+([\d.,]+)\s*$")
-BONUS_WITH_AMOUNT_PATTERN = re.compile(r"(?i)^\s*бонус(?:ы)?\s+([\d.,]+)\s*$")
+def income_category_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    """Build an inline keyboard with one button per income category."""
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")]
+        for name in INCOME_CATEGORIES
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+INCOME_PATTERN = re.compile(r"^(.+?)\s+([\d.,]+)\s*$")
 NUMBER_PATTERN = re.compile(r"^\s*([\d.,]+)\s*$")
 EXPENSE_PATTERN = re.compile(r"^(.+?)\s+([\d.,]+)\s*$")
 
@@ -480,12 +520,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "Привет! Что я умею:\n\n"
-        "• *Зарплата 1* (затем отдельным сообщением сумма) — запишет доход\n"
-        "• *Зарплата 1 4500* — то же самое одним сообщением\n"
-        "• *Бонус 300* — запишет бонус\n"
+        "• *Зарплата 4500* — запишет доход\n"
+        "• *Бонус 300* / *Self employed 200* / *Points RBC 50* — другие виды дохода\n"
         "• *Groceries 45.50* — запишет расход\n"
         "• 📸 Фото чека — распознает и запишет расход\n\n"
-        "После записи дохода я спрошу, на какой кошелёк он пришёл.",
+        "После записи дохода или расхода я спрошу, какой кошелёк использовать.",
         parse_mode="Markdown"
     )
 
@@ -496,78 +535,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
-    # 1) "Зарплата 1 4500" — salary with amount in one message
-    m = SALARY_WITH_AMOUNT_PATTERN.match(text)
+    # 1) Income: "Зарплата 4500", "Бонус 300", "Self employed 200", "Points RBC 50"
+    m = INCOME_PATTERN.match(text)
     if m:
-        salary_number, amount_str = m.group(1), m.group(2)
-        amount = float(amount_str.replace(",", "."))
-        sheet_name, row = write_salary(salary_number, amount)
-        context.user_data.pop("pending_salary", None)
+        income_text, amount_str = m.group(1).strip(), m.group(2)
+        income_category = match_income_category(income_text)
+        if income_category is not None:
+            try:
+                amount = float(amount_str.replace(",", "."))
+            except ValueError:
+                await update.message.reply_text("❌ Не понял сумму. Формат: Зарплата 4500")
+                return
 
-        # Stash the pending wallet-income operation and ask which wallet
-        context.user_data["pending_wallet_op"] = {
-            "kind": "income",
-            "amount": amount,
-            "description": f"Зарплата {salary_number}",
-        }
-        await update.message.reply_text(
-            f"✅ Зарплата {salary_number}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}\n\n"
-            f"На какой кошелёк пришли деньги?",
-            reply_markup=wallet_keyboard("walletop")
-        )
-        return
-
-    # 2) "Зарплата 1" alone — wait for the amount in the next message
-    m = SALARY_PATTERN.match(text)
-    if m:
-        salary_number = m.group(1)
-        context.user_data["pending_salary"] = salary_number
-        await update.message.reply_text(f"Ок, жду сумму для Зарплаты {salary_number} 💰")
-        return
-
-    # 3) Pending salary + this message is just a number
-    pending = context.user_data.get("pending_salary")
-    if pending:
-        m = NUMBER_PATTERN.match(text)
-        if m:
-            amount = float(m.group(1).replace(",", "."))
-            sheet_name, row = write_salary(pending, amount)
-            context.user_data.pop("pending_salary", None)
+            try:
+                sheet_name, row = write_row_category_entry(income_category, amount, income_category)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Ошибка записи: {e}")
+                return
 
             context.user_data["pending_wallet_op"] = {
                 "kind": "income",
                 "amount": amount,
-                "description": f"Зарплата {pending}",
+                "description": income_category,
             }
             await update.message.reply_text(
-                f"✅ Зарплата {pending}: ${amount:,.2f}\n📄 {sheet_name}, ячейка B{row}\n\n"
+                f"✅ {income_category}: ${amount:,.2f}\n📄 {sheet_name}, строка {row}\n\n"
                 f"На какой кошелёк пришли деньги?",
                 reply_markup=wallet_keyboard("walletop")
             )
             return
-        else:
-            # Message wasn't a number — drop the pending state and fall through
-            context.user_data.pop("pending_salary", None)
+        # else: not a recognized income category — fall through to expense matching below
 
-    # 4) "Бонус 300"
-    m = BONUS_WITH_AMOUNT_PATTERN.match(text)
-    if m:
-        amount = float(m.group(1).replace(",", "."))
-        sheet_name = write_bonus(amount)
-
-        context.user_data["pending_wallet_op"] = {
-            "kind": "income",
-            "amount": amount,
-            "description": "Бонус",
-        }
-        await update.message.reply_text(
-            f"✅ Бонус: ${amount:,.2f}\n📄 {sheet_name}\n\n"
-            f"На какой кошелёк пришли деньги?",
-            reply_markup=wallet_keyboard("walletop")
-        )
-        return
-
-    # 5) Expense: "Groceries 45.50" — match against known categories
+    # 2) Expense: "Groceries 45.50" — match against known categories
     m = EXPENSE_PATTERN.match(text)
     if m:
         description_raw, amount_str = m.group(1).strip(), m.group(2)
@@ -610,7 +609,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "Не понял. Примеры:\n*Зарплата 1*, *Groceries 45.50*, или фото чека 📸",
+        "Не понял. Примеры:\n*Зарплата 4500*, *Groceries 45.50*, или фото чека 📸",
         parse_mode="Markdown"
     )
 
@@ -741,6 +740,62 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Не смог разобрать чек: {e}")
+
+
+async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Diagnostic: scan the month sheet for the INCOM/salary block (Зарплата 1,
+    Зарплата 2, Bonuses, etc.) and dump raw cell contents around it.
+    Usage: /debugincome"""
+    if not check_access(update):
+        return
+
+    try:
+        spreadsheet = get_sheet()
+        ws = get_month_worksheet(spreadsheet)
+
+        def col_idx_to_letter(idx):
+            letters = ""
+            while idx > 0:
+                idx, rem = divmod(idx - 1, 26)
+                letters = chr(65 + rem) + letters
+            return letters
+
+        # Scan columns A (1) through Z (26) for a cell matching 'Зарплата 1'
+        found_row = None
+        found_col = None
+        for col in range(1, 27):
+            col_values = ws.col_values(col)
+            for idx, val in enumerate(col_values, start=1):
+                if (val or "").strip().lower().replace(" ", "") == "зарплата1":
+                    found_row = idx
+                    found_col = col
+                    break
+            if found_row:
+                break
+
+        if not found_row:
+            await update.message.reply_text(
+                f"❌ Не нашёл 'Зарплата 1' в колонках A-Z на листе '{ws.title}'."
+            )
+            return
+
+        col_letter = col_idx_to_letter(found_col)
+        lines = [
+            f"📄 Лист: {ws.title}",
+            f"'Зарплата 1' найдена в {col_letter}{found_row}",
+            "",
+        ]
+        for r in range(found_row - 2, found_row + 8):
+            vals = []
+            for c in range(found_col, found_col + 2):
+                cl = col_idx_to_letter(c)
+                v = ws.cell(r, c).value
+                vals.append(f"{cl}{r}={v!r}")
+            lines.append(" ".join(vals))
+
+        await update.message.reply_text("\n".join(lines))
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
 
 
 async def handle_debug_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -940,6 +995,7 @@ def main():
     app.add_handler(CommandHandler("debugwallet", handle_debug_wallet))
     app.add_handler(CommandHandler("debugcategory", handle_debug_category))
     app.add_handler(CommandHandler("debugfixed", handle_debug_fixed))
+    app.add_handler(CommandHandler("debugincome", handle_debug_income))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
     app.add_handler(CallbackQueryHandler(handle_category_choice, pattern=r"^expensecat\|"))
