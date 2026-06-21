@@ -246,9 +246,10 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
 _category_cell_cache: dict = {}
 
 
-def find_category_header_row(ws, category: str):
+def find_category_header_row(all_values, sheet_title: str, category: str):
     """Find the (row, col) of a row-based category header (expense or income,
-    e.g. 'Groceries' or 'Зарплата') by scanning columns A (1) through Z (26).
+    e.g. 'Groceries' or 'Зарплата') within an already-fetched get_all_values()
+    snapshot of the sheet (list of rows, each a list of cell strings).
 
     Some sheets also have a SUMMARY table listing category names next to
     their totals (e.g. an 'INCOM' overview block) — those rows have a value
@@ -257,33 +258,35 @@ def find_category_header_row(ws, category: str):
     nothing in the cell next to it). So among all text matches, we pick the
     first one whose adjacent cell (same row, next column) is empty.
 
-    Returns (row, col)."""
-    cache_key = ws.title
+    Returns (row, col), 1-indexed."""
+    cache_key = sheet_title
     cached = _category_cell_cache.get(cache_key, {})
     if category in cached:
         row, col = cached[category]
-        cell_val = (ws.cell(row, col).value or "").strip()
-        adjacent_val = ws.cell(row, col + 1).value
-        if cell_val.lower() == category.lower() and not (adjacent_val and str(adjacent_val).strip()):
-            return row, col
+        if row - 1 < len(all_values):
+            row_vals = all_values[row - 1]
+            cell_val = (row_vals[col - 1] if col - 1 < len(row_vals) else "") or ""
+            adjacent_val = row_vals[col] if col < len(row_vals) else ""
+            if cell_val.strip().lower() == category.lower() and not str(adjacent_val).strip():
+                return row, col
 
     candidates = []
-    for col in range(1, 27):
-        col_values = ws.col_values(col)
-        for idx, val in enumerate(col_values, start=1):
+    for r_idx, row_vals in enumerate(all_values, start=1):
+        for c_idx, val in enumerate(row_vals[:26], start=1):
             if (val or "").strip().lower() == category.lower():
-                candidates.append((idx, col))
+                candidates.append((r_idx, c_idx))
 
     if not candidates:
         raise ValueError(
-            f"Не нашёл категорию '{category}' на листе '{ws.title}' (колонки A-Z)."
+            f"Не нашёл категорию '{category}' на листе '{sheet_title}' (колонки A-Z)."
         )
 
     # Prefer a match whose adjacent cell is empty (own block header), not a
     # summary-table row that already has a value/total next to it.
     for row, col in candidates:
-        adjacent_val = ws.cell(row, col + 1).value
-        if not (adjacent_val and str(adjacent_val).strip()):
+        row_vals = all_values[row - 1]
+        adjacent_val = row_vals[col] if col < len(row_vals) else ""
+        if not str(adjacent_val).strip():
             _category_cell_cache.setdefault(cache_key, {})[category] = (row, col)
             return row, col
 
@@ -294,13 +297,18 @@ def find_category_header_row(ws, category: str):
     return row, col
 
 
-def find_next_category_row(ws, header_row: int, col: int) -> int:
-    """Find the first empty data row under a category header, scanning the
-    description column (same column as the header)."""
+def find_next_category_row(all_values, header_row: int, col: int) -> int:
+    """Find the first empty data row under a category header, using the same
+    pre-fetched get_all_values() snapshot. Scans the description column
+    (same column as the header)."""
     row = header_row + 1
     max_row = header_row + 100  # generous safety bound
     while row <= max_row:
-        cell_value = ws.cell(row, col).value
+        if row - 1 < len(all_values):
+            row_vals = all_values[row - 1]
+            cell_value = row_vals[col - 1] if col - 1 < len(row_vals) else ""
+        else:
+            cell_value = ""
         if not cell_value or not str(cell_value).strip():
             return row
         row += 1
@@ -317,9 +325,10 @@ def write_row_category_entry(category: str, amount: float, description: str):
 
     spreadsheet = get_sheet()
     ws = get_month_worksheet(spreadsheet)
-    header_row, header_col = find_category_header_row(ws, category)
+    all_values = ws.get_all_values()  # single API call for the whole sheet
 
-    target_row = find_next_category_row(ws, header_row, header_col)
+    header_row, header_col = find_category_header_row(all_values, ws.title, category)
+    target_row = find_next_category_row(all_values, header_row, header_col)
 
     date_str = datetime.now().strftime("%d.%m.")
     label = f"{date_str} {description}"
@@ -770,6 +779,7 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Diagnostic: find ALL occurrences of an income category name (e.g.
     'Зарплата') on the month sheet, since the sheet has both a summary block
     listing category names AND each category's own block with the same name.
+    Uses a single get_all_values() call to avoid hitting API rate limits.
     Usage: /debugincome [category name, default 'Зарплата']"""
     if not check_access(update):
         return
@@ -787,18 +797,26 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
                 letters = chr(65 + rem) + letters
             return letters
 
-        matches = []  # list of (row, col)
-        for col in range(1, 27):
-            col_values = ws.col_values(col)
-            for idx, val in enumerate(col_values, start=1):
+        all_values = ws.get_all_values()  # single API call for the whole sheet
+
+        matches = []  # list of (row, col) — 1-indexed
+        for r_idx, row_vals in enumerate(all_values, start=1):
+            for c_idx, val in enumerate(row_vals[:26], start=1):
                 if (val or "").strip().lower() == category.lower():
-                    matches.append((idx, col))
+                    matches.append((r_idx, c_idx))
 
         if not matches:
             await update.message.reply_text(
                 f"❌ Не нашёл '{category}' в колонках A-Z на листе '{ws.title}'."
             )
             return
+
+        def safe_get(r, c):
+            if 1 <= r <= len(all_values):
+                row_vals = all_values[r - 1]
+                if 1 <= c <= len(row_vals):
+                    return row_vals[c - 1]
+            return None
 
         lines = [f"📄 Лист: {ws.title}", f"Найдено вхождений '{category}': {len(matches)}", ""]
         for row, col in matches:
@@ -808,10 +826,11 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
                 vals = []
                 for c in range(col, col + 2):
                     ccl = col_idx_to_letter(c)
-                    v = ws.cell(r, c).value
+                    v = safe_get(r, c)
                     vals.append(f"{ccl}{r}={v!r}")
                 lines.append(" ".join(vals))
             lines.append("")
+
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
