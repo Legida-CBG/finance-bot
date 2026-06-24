@@ -66,7 +66,7 @@ ROW_BASED_CATEGORIES = [
     "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurants", "Bowling",
     "GIM", "Skiing", "Medication", "Hair Cut", "Dining Out", "Clothing",
     "Sauna", "Audiobooks", "Vehicle loan", "Car Wash", "Charity", "Gifts",
-    "Tim Hortons", "Air Tickets", "Hotels", "Food in travel",
+    "Tim Hortons", "Tickets", "Hotels", "Food in travel",
     "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
     "Parking",
 ]
