@@ -248,10 +248,12 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
 
 
 def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
-    """Record a transfer between two wallets using column D (Transfer) of
-    each wallet's block on the current month's worksheet. Writes two rows:
-    a negative entry in from_wallet's block and a positive entry in
-    to_wallet's block. Returns (sheet_title, from_row, to_row)."""
+    """Record a transfer between two wallets on the current month's worksheet:
+    - from_wallet gets a row with the amount in column D (Transfer) — money
+      that left this wallet.
+    - to_wallet gets a row with the amount in column B (Income) — money that
+      arrived in this wallet.
+    Both amounts are positive. Returns (sheet_title, from_row, to_row)."""
     if from_wallet not in WALLET_NAMES:
         raise ValueError(f"Неизвестный кошелёк: {from_wallet}")
     if to_wallet not in WALLET_NAMES:
@@ -270,12 +272,12 @@ def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
     date_str = datetime.now().strftime("%d.%m")
 
     from_row = find_next_wallet_row(ws, from_header)
-    ws.update_cell(from_row, WALLET_COL_DATE_DESC, f"{date_str}  Перевод -> {to_wallet}")
-    ws.update_cell(from_row, WALLET_COL_TRANSFER, -amount)
+    ws.update_cell(from_row, WALLET_COL_DATE_DESC, f"{date_str}  Transfer")
+    ws.update_cell(from_row, WALLET_COL_TRANSFER, amount)
 
     to_row = find_next_wallet_row(ws, to_header)
-    ws.update_cell(to_row, WALLET_COL_DATE_DESC, f"{date_str}  Перевод <- {from_wallet}")
-    ws.update_cell(to_row, WALLET_COL_TRANSFER, amount)
+    ws.update_cell(to_row, WALLET_COL_DATE_DESC, f"{date_str}  Transfer")
+    ws.update_cell(to_row, WALLET_COL_INCOME, amount)
 
     return ws.title, from_row, to_row
 
@@ -611,6 +613,7 @@ def income_category_keyboard(prefix: str) -> InlineKeyboardMarkup:
 INCOME_PATTERN = re.compile(r"^(.+?)\s+([\d.,]+)\s*$")
 NUMBER_PATTERN = re.compile(r"^\s*([\d.,]+)\s*$")
 EXPENSE_PATTERN = re.compile(r"^(.+?)\s+([\d.,]+)\s*$")
+TRANSFER_PATTERN = re.compile(r"^(?:transfer|перевод)\s+([\d.,]+)\s*$", re.IGNORECASE)
 
 
 def check_access(update: Update) -> bool:
@@ -626,7 +629,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *Бонус 300* / *Self employed 200* / *Points RBC 50* — другие виды дохода\n"
         "• *Groceries 45.50* — запишет расход\n"
         "• 📸 Фото чека — распознает и запишет расход\n"
-        "• */transfer* — перевод денег между кошельками\n\n"
+        "• *Transfer 100* (или */transfer*) — перевод денег между кошельками\n\n"
         "После записи дохода или расхода я спрошу, какой кошелёк использовать.",
         parse_mode="Markdown"
     )
@@ -694,6 +697,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Комментарий добавлен.")
         except Exception as e:
             await update.message.reply_text(f"❌ Не смог записать комментарий: {e}")
+        return
+
+    # 0b) Transfer trigger: "Transfer 100" / "Перевод 100" — start the
+    # from/to wallet selection flow with the amount already known.
+    m_transfer = TRANSFER_PATTERN.match(text)
+    if m_transfer:
+        try:
+            amount = float(m_transfer.group(1).replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("❌ Не понял сумму. Формат: Transfer 100")
+            return
+        context.user_data["pending_transfer"] = {"amount": amount}
+        await update.message.reply_text(
+            "Перевод между кошельками.\nС какого кошелька списать?",
+            reply_markup=wallet_keyboard("transferfrom")
+        )
         return
 
     # 1) Income: "Зарплата 4500", "Бонус 300", "Self employed 200", "Points RBC 50"
@@ -857,7 +876,8 @@ async def handle_transfer_from_choice(update: Update, context: ContextTypes.DEFA
     except ValueError:
         return
 
-    context.user_data["pending_transfer"] = {"from": wallet}
+    pending = context.user_data.setdefault("pending_transfer", {})
+    pending["from"] = wallet
     await query.edit_message_text(f"С какого кошелька списать? *{wallet}*", parse_mode="Markdown")
     await query.message.reply_text(
         "На какой кошелёк перевести?",
@@ -880,13 +900,43 @@ async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAUL
 
     pending = context.user_data.get("pending_transfer")
     if pending is None or "from" not in pending:
-        await query.edit_message_text("⚠️ Не нашёл начало операции перевода (возможно, бот перезапускался). Начни заново: /transfer")
+        await query.edit_message_text("⚠️ Не нашёл начало операции перевода (возможно, бот перезапускался). Начни заново: Transfer 100 или /transfer")
         return
 
     pending["to"] = wallet
+    from_wallet = pending["from"]
+
+    if "amount" in pending:
+        amount = pending["amount"]
+        context.user_data.pop("pending_transfer", None)
+        await query.edit_message_text(f"На какой кошелёк перевести? *{wallet}*", parse_mode="Markdown")
+
+        try:
+            sheet_name, from_row, to_row = write_transfer_entry(from_wallet, wallet, amount)
+        except Exception as e:
+            await query.message.reply_text(f"❌ Ошибка записи перевода: {e}")
+            return
+
+        context.user_data["pending_comment"] = {
+            "targets": [
+                {"sheet": sheet_name, "row": from_row, "col": WALLET_COL_DATE_DESC},
+                {"sheet": sheet_name, "row": to_row, "col": WALLET_COL_DATE_DESC},
+            ]
+        }
+        await query.message.reply_text(
+            f"✅ Перевод ${amount:,.2f}: *{from_wallet}* → *{wallet}*\n"
+            f"📄 {sheet_name}, строки {from_row} и {to_row}",
+            parse_mode="Markdown"
+        )
+        await query.message.reply_text(
+            "Добавить комментарий к этому переводу?",
+            reply_markup=comment_skip_keyboard()
+        )
+        return
+
     pending["awaiting_amount"] = True
     await query.edit_message_text(f"На какой кошелёк перевести? *{wallet}*", parse_mode="Markdown")
-    await query.message.reply_text(f"Сумма перевода ({pending['from']} → {wallet})?")
+    await query.message.reply_text(f"Сумма перевода ({from_wallet} → {wallet})?")
 
 
 async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
