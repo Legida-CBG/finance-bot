@@ -247,6 +247,39 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     return ws.title, target_row
 
 
+def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
+    """Record a transfer between two wallets using column D (Transfer) of
+    each wallet's block on the current month's worksheet. Writes two rows:
+    a negative entry in from_wallet's block and a positive entry in
+    to_wallet's block. Returns (sheet_title, from_row, to_row)."""
+    if from_wallet not in WALLET_NAMES:
+        raise ValueError(f"Неизвестный кошелёк: {from_wallet}")
+    if to_wallet not in WALLET_NAMES:
+        raise ValueError(f"Неизвестный кошелёк: {to_wallet}")
+    if from_wallet == to_wallet:
+        raise ValueError("Кошелёк-источник и кошелёк-получатель совпадают.")
+
+    spreadsheet = get_sheet()
+    ws = get_month_worksheet(spreadsheet)
+
+    from_header = find_wallet_header_row(ws, from_wallet)
+    to_header = find_wallet_header_row(ws, to_wallet)
+    verify_wallet_labels(ws, from_header)
+    verify_wallet_labels(ws, to_header)
+
+    date_str = datetime.now().strftime("%d.%m")
+
+    from_row = find_next_wallet_row(ws, from_header)
+    ws.update_cell(from_row, WALLET_COL_DATE_DESC, f"{date_str}  Перевод -> {to_wallet}")
+    ws.update_cell(from_row, WALLET_COL_TRANSFER, -amount)
+
+    to_row = find_next_wallet_row(ws, to_header)
+    ws.update_cell(to_row, WALLET_COL_DATE_DESC, f"{date_str}  Перевод <- {from_wallet}")
+    ws.update_cell(to_row, WALLET_COL_TRANSFER, amount)
+
+    return ws.title, from_row, to_row
+
+
 # ─── Expense category handling ───────────────────────────────────────────────
 
 # Cache of {sheet_title: {category_name: (header_row, header_col)}} to avoid
@@ -485,6 +518,16 @@ def wallet_keyboard(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def wallet_keyboard_excluding(prefix: str, exclude: str) -> InlineKeyboardMarkup:
+    """Same as wallet_keyboard, but leaves out one wallet (used for the
+    'transfer to' step, so you can't pick the same wallet as source)."""
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")]
+        for name in WALLET_NAMES if name != exclude
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def comment_skip_keyboard() -> InlineKeyboardMarkup:
     """Single button to skip adding a comment to the just-recorded entry."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("Без комментария", callback_data="skipcomment")]])
@@ -582,7 +625,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• *Зарплата 4500* — запишет доход\n"
         "• *Бонус 300* / *Self employed 200* / *Points RBC 50* — другие виды дохода\n"
         "• *Groceries 45.50* — запишет расход\n"
-        "• 📸 Фото чека — распознает и запишет расход\n\n"
+        "• 📸 Фото чека — распознает и запишет расход\n"
+        "• */transfer* — перевод денег между кошельками\n\n"
         "После записи дохода или расхода я спрошу, какой кошелёк использовать.",
         parse_mode="Markdown"
     )
@@ -594,14 +638,59 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    # 0a) If we're waiting for the amount of a transfer (after picking
+    # from/to wallets via buttons), treat this message as that amount.
+    pending_transfer = context.user_data.get("pending_transfer")
+    if pending_transfer is not None and pending_transfer.get("awaiting_amount"):
+        m_amount = NUMBER_PATTERN.match(text)
+        if not m_amount:
+            await update.message.reply_text("❌ Не понял сумму. Введи число, например 100 или 100.50")
+            return
+        try:
+            amount = float(m_amount.group(1).replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("❌ Не понял сумму. Введи число, например 100 или 100.50")
+            return
+
+        context.user_data.pop("pending_transfer", None)
+        from_wallet = pending_transfer["from"]
+        to_wallet = pending_transfer["to"]
+
+        try:
+            sheet_name, from_row, to_row = write_transfer_entry(from_wallet, to_wallet, amount)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка записи перевода: {e}")
+            return
+
+        context.user_data["pending_comment"] = {
+            "targets": [
+                {"sheet": sheet_name, "row": from_row, "col": WALLET_COL_DATE_DESC},
+                {"sheet": sheet_name, "row": to_row, "col": WALLET_COL_DATE_DESC},
+            ]
+        }
+        await update.message.reply_text(
+            f"✅ Перевод ${amount:,.2f}: *{from_wallet}* → *{to_wallet}*\n"
+            f"📄 {sheet_name}, строки {from_row} и {to_row}",
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text(
+            "Добавить комментарий к этому переводу?",
+            reply_markup=comment_skip_keyboard()
+        )
+        return
+
     # 0) If we're waiting for a comment on the last recorded entry, treat
     # this message as that comment rather than trying to parse a new operation.
     pending_comment = context.user_data.pop("pending_comment", None)
     if pending_comment is not None:
         try:
-            append_comment_to_cell(
-                pending_comment["sheet"], pending_comment["row"], pending_comment["col"], text
-            )
+            if "targets" in pending_comment:
+                for t in pending_comment["targets"]:
+                    append_comment_to_cell(t["sheet"], t["row"], t["col"], text)
+            else:
+                append_comment_to_cell(
+                    pending_comment["sheet"], pending_comment["row"], pending_comment["col"], text
+                )
             await update.message.reply_text("✅ Комментарий добавлен.")
         except Exception as e:
             await update.message.reply_text(f"❌ Не смог записать комментарий: {e}")
@@ -731,9 +820,9 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         # offer to attach a free-text comment to it.
         if op.get("entry_sheet") and op.get("entry_row") and op.get("entry_col"):
             context.user_data["pending_comment"] = {
-                "sheet": op["entry_sheet"],
-                "row": op["entry_row"],
-                "col": op["entry_col"],
+                "targets": [
+                    {"sheet": op["entry_sheet"], "row": op["entry_row"], "col": op["entry_col"]}
+                ]
             }
             await query.message.reply_text(
                 "Добавить комментарий к этой записи?",
@@ -741,6 +830,63 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             )
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка записи в кошелёк: {e}")
+
+
+async def handle_transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/transfer — start the wallet-to-wallet transfer flow by asking for
+    the source wallet first."""
+    if not check_access(update):
+        return
+    context.user_data.pop("pending_transfer", None)
+    await update.message.reply_text(
+        "Перевод между кошельками.\nС какого кошелька списать?",
+        reply_markup=wallet_keyboard("transferfrom")
+    )
+
+
+async def handle_transfer_from_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle picking the source wallet for a transfer."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    try:
+        _, wallet = query.data.split("|", 1)
+    except ValueError:
+        return
+
+    context.user_data["pending_transfer"] = {"from": wallet}
+    await query.edit_message_text(f"С какого кошелька списать? *{wallet}*", parse_mode="Markdown")
+    await query.message.reply_text(
+        "На какой кошелёк перевести?",
+        reply_markup=wallet_keyboard_excluding("transferto", exclude=wallet)
+    )
+
+
+async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle picking the destination wallet for a transfer, then ask for the amount."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    try:
+        _, wallet = query.data.split("|", 1)
+    except ValueError:
+        return
+
+    pending = context.user_data.get("pending_transfer")
+    if pending is None or "from" not in pending:
+        await query.edit_message_text("⚠️ Не нашёл начало операции перевода (возможно, бот перезапускался). Начни заново: /transfer")
+        return
+
+    pending["to"] = wallet
+    pending["awaiting_amount"] = True
+    await query.edit_message_text(f"На какой кошелёк перевести? *{wallet}*", parse_mode="Markdown")
+    await query.message.reply_text(f"Сумма перевода ({pending['from']} → {wallet})?")
 
 
 async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1111,8 +1257,11 @@ def main():
     app.add_handler(CommandHandler("debugcategory", handle_debug_category))
     app.add_handler(CommandHandler("debugfixed", handle_debug_fixed))
     app.add_handler(CommandHandler("debugincome", handle_debug_income))
+    app.add_handler(CommandHandler("transfer", handle_transfer_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(handle_wallet_choice, pattern=r"^walletop\|"))
+    app.add_handler(CallbackQueryHandler(handle_transfer_from_choice, pattern=r"^transferfrom\|"))
+    app.add_handler(CallbackQueryHandler(handle_transfer_to_choice, pattern=r"^transferto\|"))
     app.add_handler(CallbackQueryHandler(handle_category_choice, pattern=r"^expensecat\|"))
     app.add_handler(CallbackQueryHandler(handle_skip_comment, pattern=r"^skipcomment$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
