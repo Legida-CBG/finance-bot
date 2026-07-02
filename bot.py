@@ -4,6 +4,12 @@ import base64
 import json
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+VANCOUVER_TZ = ZoneInfo("America/Vancouver")
+
+def now_local():
+    return datetime.now(VANCOUVER_TZ)
 
 import anthropic
 import gspread
@@ -145,7 +151,7 @@ def get_sheet():
 def get_month_worksheet(spreadsheet):
     """Find the daily-tracker worksheet for the current month, tolerant of spacing
     differences (e.g. 'June 2026' vs 'June  2026'). Skips 'BUDGET - ...' sheets."""
-    now = datetime.now()
+    now = now_local()
     month_name = MONTH_NAMES_EN[now.month]
     year = str(now.year)
 
@@ -166,7 +172,7 @@ def get_budget_worksheet(spreadsheet):
     """Find the 'BUDGET - <Month> <Year>' (now possibly renamed to
     'FINANCE - <Month> <Year>') worksheet for the current month.
     Currently unused by the bot's write path — kept for future reference/reads."""
-    now = datetime.now()
+    now = now_local()
     month_name = MONTH_NAMES_EN[now.month]
     year = str(now.year)
 
@@ -236,7 +242,7 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
 
     target_row = find_next_wallet_row(ws, header_row)
 
-    date_str = datetime.now().strftime("%d.%m")
+    date_str = now_local().strftime("%d.%m")
     label = f"{date_str}  {description}"
 
     col = WALLET_COL_INCOME if kind == "income" else WALLET_COL_OUTCOME
@@ -269,7 +275,7 @@ def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
     verify_wallet_labels(ws, from_header)
     verify_wallet_labels(ws, to_header)
 
-    date_str = datetime.now().strftime("%d.%m")
+    date_str = now_local().strftime("%d.%m")
 
     from_row = find_next_wallet_row(ws, from_header)
     ws.update_cell(from_row, WALLET_COL_DATE_DESC, f"{date_str}  Transfer")
@@ -373,7 +379,7 @@ def write_row_category_entry(category: str, amount: float, description: str):
     header_row, header_col = find_category_header_row(all_values, ws.title, category)
     target_row = find_next_category_row(all_values, header_row, header_col)
 
-    date_str = datetime.now().strftime("%d.%m.")
+    date_str = now_local().strftime("%d.%m.")
     label = f"{date_str} {description}"
 
     ws.update_cell(target_row, header_col, label)
@@ -454,7 +460,7 @@ def write_expense(description: str, amount: float):
     spreadsheet = get_sheet()
     ws = get_month_worksheet(spreadsheet)
 
-    today = datetime.now().day
+    today = now_local().day
     desc_col_idx = col_letter_to_index(EXPENSE_DESC_COL)
     amount_col_idx = col_letter_to_index(EXPENSE_AMOUNT_COL)
 
