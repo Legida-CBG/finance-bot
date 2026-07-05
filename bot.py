@@ -90,6 +90,22 @@ FIXED_CATEGORIES = []
 # with a 'Total' row further down (which is then pulled by formula elsewhere).
 INCOME_CATEGORIES = ["Зарплата", "Points RBC", "Бонус", "Инвойс"]
 
+# English display names for income categories, used only in Telegram messages.
+# The sheet itself still uses the Russian labels above for lookups/writes.
+INCOME_CATEGORY_DISPLAY_EN = {
+    "Зарплата": "Salary",
+    "Бонус": "Bonus",
+    "Инвойс": "Invoice",
+    "Points RBC": "Points RBC",
+}
+
+
+def display_category(category: str) -> str:
+    """Return the English label to show in Telegram for a given internal
+    (sheet-matching) category name. Falls back to the raw name if there's
+    no mapping (e.g. expense categories, which are already English)."""
+    return INCOME_CATEGORY_DISPLAY_EN.get(category, category)
+
 ALL_EXPENSE_CATEGORIES = ROW_BASED_CATEGORIES + FIXED_CATEGORIES
 
 # Column layout for the fixed-payment table on the FINANCE sheet
@@ -134,8 +150,8 @@ def find_wallet_header_row(ws, wallet: str) -> int:
             return idx
 
     raise ValueError(
-        f"Не нашёл кошелёк '{wallet}' на листе '{ws.title}'. "
-        f"Проверь, что название в колонке A написано точно так же."
+        f"Couldn't find wallet '{wallet}' on sheet '{ws.title}'. "
+        f"Check that the name in column A is spelled exactly the same way."
     )
 
 
@@ -163,8 +179,8 @@ def get_month_worksheet(spreadsheet):
             return ws
 
     raise ValueError(
-        f"Не нашёл лист для {month_name} {year}. "
-        f"Создай вкладку на основе шаблона BUDGET."
+        f"Couldn't find a sheet for {month_name} {year}. "
+        f"Create a tab based on the BUDGET template."
     )
 
 
@@ -184,8 +200,8 @@ def get_budget_worksheet(spreadsheet):
             return ws
 
     raise ValueError(
-        f"Не нашёл лист 'BUDGET/FINANCE - {month_name} {year}'. "
-        f"Создай его на основе шаблона предыдущего месяца."
+        f"Couldn't find sheet 'BUDGET/FINANCE - {month_name} {year}'. "
+        f"Create it based on last month's template."
     )
 
 
@@ -208,7 +224,7 @@ def find_next_wallet_row(ws, header_row: int) -> int:
         if not cell_value or not str(cell_value).strip():
             return row
         row += 1
-    raise ValueError("Не нашёл свободную строку в блоке кошелька (блок переполнен).")
+    raise ValueError("Couldn't find a free row in the wallet block (block is full).")
 
 
 def verify_wallet_labels(ws, header_row: int):
@@ -219,8 +235,8 @@ def verify_wallet_labels(ws, header_row: int):
     outcome_label = (ws.cell(header_row, WALLET_COL_OUTCOME).value or "").strip().lower()
     if "income" not in income_label or "outcome" not in outcome_label:
         raise ValueError(
-            f"Структура листа изменилась: в строке {header_row} не нашёл "
-            f"income/outcome рядом с именем кошелька. Запись отменена, ничего не испорчено."
+            f"The sheet structure has changed: row {header_row} doesn't have "
+            f"income/outcome next to the wallet name. Write cancelled, nothing was changed."
         )
 
 
@@ -232,7 +248,7 @@ def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     immediately below that.
     kind: 'income' or 'outcome'."""
     if wallet not in WALLET_NAMES:
-        raise ValueError(f"Неизвестный кошелёк: {wallet}")
+        raise ValueError(f"Unknown wallet: {wallet}")
 
     spreadsheet = get_sheet()
     ws = get_month_worksheet(spreadsheet)
@@ -261,11 +277,11 @@ def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
       arrived in this wallet.
     Both amounts are positive. Returns (sheet_title, from_row, to_row)."""
     if from_wallet not in WALLET_NAMES:
-        raise ValueError(f"Неизвестный кошелёк: {from_wallet}")
+        raise ValueError(f"Unknown wallet: {from_wallet}")
     if to_wallet not in WALLET_NAMES:
-        raise ValueError(f"Неизвестный кошелёк: {to_wallet}")
+        raise ValueError(f"Unknown wallet: {to_wallet}")
     if from_wallet == to_wallet:
-        raise ValueError("Кошелёк-источник и кошелёк-получатель совпадают.")
+        raise ValueError("Source wallet and destination wallet are the same.")
 
     spreadsheet = get_sheet()
     ws = get_month_worksheet(spreadsheet)
@@ -327,7 +343,7 @@ def find_category_header_row(all_values, sheet_title: str, category: str):
 
     if not candidates:
         raise ValueError(
-            f"Не нашёл категорию '{category}' на листе '{sheet_title}' (колонки A-Z)."
+            f"Couldn't find category '{category}' on sheet '{sheet_title}' (columns A-Z)."
         )
 
     # Prefer a match whose adjacent cell is empty (own block header), not a
@@ -361,7 +377,7 @@ def find_next_category_row(all_values, header_row: int, col: int) -> int:
         if not cell_value or not str(cell_value).strip():
             return row
         row += 1
-    raise ValueError("Не нашёл свободную строку в блоке категории (блок переполнен).")
+    raise ValueError("Couldn't find a free row in the category block (block is full).")
 
 
 def write_row_category_entry(category: str, amount: float, description: str):
@@ -370,7 +386,7 @@ def write_row_category_entry(category: str, amount: float, description: str):
     entry format: description column gets 'DD.MM. description', amount
     column (next column over) gets the amount."""
     if category not in ROW_BASED_CATEGORIES and category not in INCOME_CATEGORIES:
-        raise ValueError(f"Неизвестная построчная категория: {category}")
+        raise ValueError(f"Unknown row-based category: {category}")
 
     spreadsheet = get_sheet()
     ws = get_month_worksheet(spreadsheet)
@@ -403,7 +419,7 @@ def write_fixed_category_entry(category: str, amount: float):
     payment category (e.g. 'Rent') on the 'FINANCE - <Month> <Year>' sheet.
     Adds to whatever is already there rather than overwriting."""
     if category not in FIXED_CATEGORIES:
-        raise ValueError(f"Неизвестная фиксированная категория: {category}")
+        raise ValueError(f"Unknown fixed category: {category}")
 
     spreadsheet = get_sheet()
     ws = get_budget_worksheet(spreadsheet)
@@ -417,7 +433,7 @@ def write_fixed_category_entry(category: str, amount: float):
 
     if found_row is None:
         raise ValueError(
-            f"Не нашёл категорию '{category}' в колонке B на листе '{ws.title}'."
+            f"Couldn't find category '{category}' in column B on sheet '{ws.title}'."
         )
 
     existing_raw = ws.cell(found_row, FIXED_COL_ACTUAL).value or "0"
@@ -441,7 +457,7 @@ def write_salary(salary_number: str, amount: float):
     ws = get_month_worksheet(spreadsheet)
     row = SALARY_ROWS.get(salary_number)
     if row is None:
-        raise ValueError(f"Неизвестный номер зарплаты: {salary_number}")
+        raise ValueError(f"Unknown salary number: {salary_number}")
     ws.update_cell(row, 2, amount)  # column B
     return ws.title, row
 
@@ -491,7 +507,7 @@ def analyze_receipt_with_claude(image_bytes: bytes) -> dict:
 
     prompt = f"""You are a financial assistant analyzing a receipt photo.
 
-Extract the total amount spent and a short description (store name + main items).
+Extract the total amount spent and a short description in English (store name + main items).
 Pick the single best matching category from this list:
 {categories_str}
 
@@ -538,7 +554,7 @@ def wallet_keyboard_excluding(prefix: str, exclude: str) -> InlineKeyboardMarkup
 
 def comment_skip_keyboard() -> InlineKeyboardMarkup:
     """Single button to skip adding a comment to the just-recorded entry."""
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Без комментария", callback_data="skipcomment")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("No comment", callback_data="skipcomment")]])
 
 
 # ─── Telegram handlers ────────────────────────────────────────────────────────
@@ -590,12 +606,12 @@ def write_expense_to_category(category: str, amount: float, description: str):
     FINANCE-sheet path since comments aren't supported there."""
     if category in ROW_BASED_CATEGORIES:
         sheet_name, row, col = write_row_category_entry(category, amount, description)
-        return sheet_name, f"строка {row}", row, col
+        return sheet_name, f"row {row}", row, col
     elif category in FIXED_CATEGORIES:
         sheet_name, row = write_fixed_category_entry(category, amount)
-        return sheet_name, f"строка {row} (Actual cost)", None, None
+        return sheet_name, f"row {row} (Actual cost)", None, None
     else:
-        raise ValueError(f"Неизвестная категория: {category}")
+        raise ValueError(f"Unknown category: {category}")
 
 
 def category_keyboard(prefix: str) -> InlineKeyboardMarkup:
@@ -610,7 +626,7 @@ def category_keyboard(prefix: str) -> InlineKeyboardMarkup:
 def income_category_keyboard(prefix: str) -> InlineKeyboardMarkup:
     """Build an inline keyboard with one button per income category."""
     buttons = [
-        [InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")]
+        [InlineKeyboardButton(display_category(name), callback_data=f"{prefix}|{name}")]
         for name in INCOME_CATEGORIES
     ]
     return InlineKeyboardMarkup(buttons)
@@ -630,13 +646,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update):
         return
     await update.message.reply_text(
-        "Привет! Что я умею:\n\n"
-        "• *Зарплата 4500* — запишет доход\n"
-        "• *Бонус 300* / *Self employed 200* / *Points RBC 50* — другие виды дохода\n"
-        "• *Groceries 45.50* — запишет расход\n"
-        "• 📸 Фото чека — распознает и запишет расход\n"
-        "• *Transfer 100* (или */transfer*) — перевод денег между кошельками\n\n"
-        "После записи дохода или расхода я спрошу, какой кошелёк использовать.",
+        "Hi! Here's what I can do:\n\n"
+        "• *Salary 4500* — logs income\n"
+        "• *Bonus 300* / *Self employed 200* / *Points RBC 50* — other income types\n"
+        "• *Groceries 45.50* — logs an expense\n"
+        "• 📸 Photo of a receipt — reads it and logs the expense\n"
+        "• *Transfer 100* (or */transfer*) — moves money between wallets\n\n"
+        "After logging income or an expense, I'll ask which wallet to use.",
         parse_mode="Markdown"
     )
 
@@ -653,12 +669,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pending_transfer is not None and pending_transfer.get("awaiting_amount"):
         m_amount = NUMBER_PATTERN.match(text)
         if not m_amount:
-            await update.message.reply_text("❌ Не понял сумму. Введи число, например 100 или 100.50")
+            await update.message.reply_text("❌ Didn't understand the amount. Enter a number, e.g. 100 or 100.50")
             return
         try:
             amount = float(m_amount.group(1).replace(",", "."))
         except ValueError:
-            await update.message.reply_text("❌ Не понял сумму. Введи число, например 100 или 100.50")
+            await update.message.reply_text("❌ Didn't understand the amount. Enter a number, e.g. 100 or 100.50")
             return
 
         context.user_data.pop("pending_transfer", None)
@@ -668,7 +684,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             sheet_name, from_row, to_row = write_transfer_entry(from_wallet, to_wallet, amount)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка записи перевода: {e}")
+            await update.message.reply_text(f"❌ Error recording transfer: {e}")
             return
 
         context.user_data["pending_comment"] = {
@@ -678,12 +694,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         }
         await update.message.reply_text(
-            f"✅ Перевод ${amount:,.2f}: *{from_wallet}* → *{to_wallet}*\n"
-            f"📄 {sheet_name}, строки {from_row} и {to_row}",
+            f"✅ Transfer ${amount:,.2f}: *{from_wallet}* → *{to_wallet}*\n"
+            f"📄 {sheet_name}, rows {from_row} and {to_row}",
             parse_mode="Markdown"
         )
         await update.message.reply_text(
-            "Добавить комментарий к этому переводу?",
+            "Add a comment to this transfer?",
             reply_markup=comment_skip_keyboard()
         )
         return
@@ -700,9 +716,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 append_comment_to_cell(
                     pending_comment["sheet"], pending_comment["row"], pending_comment["col"], text
                 )
-            await update.message.reply_text("✅ Комментарий добавлен.")
+            await update.message.reply_text("✅ Comment added.")
         except Exception as e:
-            await update.message.reply_text(f"❌ Не смог записать комментарий: {e}")
+            await update.message.reply_text(f"❌ Couldn't save the comment: {e}")
         return
 
     # 0b) Transfer trigger: "Transfer 100" / "Перевод 100" — start the
@@ -712,11 +728,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = float(m_transfer.group(1).replace(",", "."))
         except ValueError:
-            await update.message.reply_text("❌ Не понял сумму. Формат: Transfer 100")
+            await update.message.reply_text("❌ Didn't understand the amount. Format: Transfer 100")
             return
         context.user_data["pending_transfer"] = {"amount": amount}
         await update.message.reply_text(
-            "Перевод между кошельками.\nС какого кошелька списать?",
+            "Transfer between wallets.\nWhich wallet to take the money from?",
             reply_markup=wallet_keyboard("transferfrom")
         )
         return
@@ -730,13 +746,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 amount = float(amount_str.replace(",", "."))
             except ValueError:
-                await update.message.reply_text("❌ Не понял сумму. Формат: Зарплата 4500")
+                await update.message.reply_text("❌ Didn't understand the amount. Format: Salary 4500")
                 return
 
             try:
                 sheet_name, row, col = write_row_category_entry(income_category, amount, income_category)
             except Exception as e:
-                await update.message.reply_text(f"❌ Ошибка записи: {e}")
+                await update.message.reply_text(f"❌ Error recording entry: {e}")
                 return
 
             context.user_data["pending_wallet_op"] = {
@@ -748,8 +764,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "entry_col": col,
             }
             await update.message.reply_text(
-                f"✅ {income_category}: ${amount:,.2f}\n📄 {sheet_name}, строка {row}\n\n"
-                f"На какой кошелёк пришли деньги?",
+                f"✅ {display_category(income_category)}: ${amount:,.2f}\n📄 {sheet_name}, row {row}\n\n"
+                f"Which wallet did the money come into?",
                 reply_markup=wallet_keyboard("walletop")
             )
             return
@@ -762,7 +778,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = float(amount_str.replace(",", "."))
         except ValueError:
-            await update.message.reply_text("❌ Не понял сумму. Формат: Категория 45.50")
+            await update.message.reply_text("❌ Didn't understand the amount. Format: Category 45.50")
             return
 
         category = match_category(description_raw)
@@ -774,7 +790,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "description": description_raw,
             }
             await update.message.reply_text(
-                f"Не узнал категорию '{description_raw}'. Выбери из списка:",
+                f"Didn't recognize category '{description_raw}'. Pick from the list:",
                 reply_markup=category_keyboard("expensecat")
             )
             return
@@ -782,7 +798,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             sheet_name, location, row, col = write_expense_to_category(category, amount, description_raw)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка записи: {e}")
+            await update.message.reply_text(f"❌ Error recording entry: {e}")
             return
 
         context.user_data["pending_wallet_op"] = {
@@ -794,14 +810,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "entry_col": col,
         }
         await update.message.reply_text(
-            f"✅ Расход: {category} — ${amount:,.2f}\n📄 {sheet_name}, {location}\n\n"
-            f"С какого кошелька списать?",
+            f"✅ Expense: {category} — ${amount:,.2f}\n📄 {sheet_name}, {location}\n\n"
+            f"Which wallet to take it from?",
             reply_markup=wallet_keyboard("walletop")
         )
         return
 
     await update.message.reply_text(
-        "Не понял. Примеры:\n*Зарплата 4500*, *Groceries 45.50*, или фото чека 📸",
+        "Didn't understand. Examples:\n*Salary 4500*, *Groceries 45.50*, or a photo of a receipt 📸",
         parse_mode="Markdown"
     )
 
@@ -824,7 +840,7 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
 
     op = context.user_data.pop("pending_wallet_op", None)
     if op is None:
-        await query.edit_message_text("⚠️ Не нашёл операцию для записи (возможно, бот перезапускался). Повтори ввод.")
+        await query.edit_message_text("⚠️ Couldn't find the operation to record (the bot may have restarted). Please try again.")
         return
 
     try:
@@ -834,10 +850,10 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             amount=op["amount"],
             description=op["description"],
         )
-        kind_label = "Доход" if op["kind"] == "income" else "Расход"
+        kind_label = "Income" if op["kind"] == "income" else "Expense"
         await query.edit_message_text(
-            f"✅ {kind_label} ${op['amount']:,.2f} записан в кошелёк *{wallet}*\n"
-            f"📄 {sheet_name}, строка {row}",
+            f"✅ {kind_label} ${op['amount']:,.2f} recorded to wallet *{wallet}*\n"
+            f"📄 {sheet_name}, row {row}",
             parse_mode="Markdown"
         )
 
@@ -850,11 +866,11 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
                 ]
             }
             await query.message.reply_text(
-                "Добавить комментарий к этой записи?",
+                "Add a comment to this entry?",
                 reply_markup=comment_skip_keyboard()
             )
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка записи в кошелёк: {e}")
+        await query.edit_message_text(f"❌ Error recording to wallet: {e}")
 
 
 async def handle_transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -864,7 +880,7 @@ async def handle_transfer_command(update: Update, context: ContextTypes.DEFAULT_
         return
     context.user_data.pop("pending_transfer", None)
     await update.message.reply_text(
-        "Перевод между кошельками.\nС какого кошелька списать?",
+        "Transfer between wallets.\nWhich wallet to take the money from?",
         reply_markup=wallet_keyboard("transferfrom")
     )
 
@@ -884,9 +900,9 @@ async def handle_transfer_from_choice(update: Update, context: ContextTypes.DEFA
 
     pending = context.user_data.setdefault("pending_transfer", {})
     pending["from"] = wallet
-    await query.edit_message_text(f"С какого кошелька списать? *{wallet}*", parse_mode="Markdown")
+    await query.edit_message_text(f"Which wallet to take it from? *{wallet}*", parse_mode="Markdown")
     await query.message.reply_text(
-        "На какой кошелёк перевести?",
+        "Which wallet to transfer to?",
         reply_markup=wallet_keyboard_excluding("transferto", exclude=wallet)
     )
 
@@ -906,7 +922,7 @@ async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAUL
 
     pending = context.user_data.get("pending_transfer")
     if pending is None or "from" not in pending:
-        await query.edit_message_text("⚠️ Не нашёл начало операции перевода (возможно, бот перезапускался). Начни заново: Transfer 100 или /transfer")
+        await query.edit_message_text("⚠️ Couldn't find the start of the transfer operation (the bot may have restarted). Please start over: Transfer 100 or /transfer")
         return
 
     pending["to"] = wallet
@@ -915,12 +931,12 @@ async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAUL
     if "amount" in pending:
         amount = pending["amount"]
         context.user_data.pop("pending_transfer", None)
-        await query.edit_message_text(f"На какой кошелёк перевести? *{wallet}*", parse_mode="Markdown")
+        await query.edit_message_text(f"Which wallet to transfer to? *{wallet}*", parse_mode="Markdown")
 
         try:
             sheet_name, from_row, to_row = write_transfer_entry(from_wallet, wallet, amount)
         except Exception as e:
-            await query.message.reply_text(f"❌ Ошибка записи перевода: {e}")
+            await query.message.reply_text(f"❌ Error recording transfer: {e}")
             return
 
         context.user_data["pending_comment"] = {
@@ -930,23 +946,23 @@ async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAUL
             ]
         }
         await query.message.reply_text(
-            f"✅ Перевод ${amount:,.2f}: *{from_wallet}* → *{wallet}*\n"
-            f"📄 {sheet_name}, строки {from_row} и {to_row}",
+            f"✅ Transfer ${amount:,.2f}: *{from_wallet}* → *{wallet}*\n"
+            f"📄 {sheet_name}, rows {from_row} and {to_row}",
             parse_mode="Markdown"
         )
         await query.message.reply_text(
-            "Добавить комментарий к этому переводу?",
+            "Add a comment to this transfer?",
             reply_markup=comment_skip_keyboard()
         )
         return
 
     pending["awaiting_amount"] = True
-    await query.edit_message_text(f"На какой кошелёк перевести? *{wallet}*", parse_mode="Markdown")
-    await query.message.reply_text(f"Сумма перевода ({from_wallet} → {wallet})?")
+    await query.edit_message_text(f"Which wallet to transfer to? *{wallet}*", parse_mode="Markdown")
+    await query.message.reply_text(f"Transfer amount ({from_wallet} → {wallet})?")
 
 
 async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the 'Без комментария' button — just clears the pending comment slot."""
+    """Handle the 'No comment' button — just clears the pending comment slot."""
     query = update.callback_query
     await query.answer()
 
@@ -954,7 +970,7 @@ async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     context.user_data.pop("pending_comment", None)
-    await query.edit_message_text("Без комментария.")
+    await query.edit_message_text("No comment.")
 
 
 async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -976,7 +992,7 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
 
     pending = context.user_data.pop("pending_expense_category_pick", None)
     if pending is None:
-        await query.edit_message_text("⚠️ Не нашёл операцию для записи (возможно, бот перезапускался). Повтори ввод.")
+        await query.edit_message_text("⚠️ Couldn't find the operation to record (the bot may have restarted). Please try again.")
         return
 
     try:
@@ -984,7 +1000,7 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
             category, pending["amount"], pending["description"]
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка записи: {e}")
+        await query.edit_message_text(f"❌ Error recording entry: {e}")
         return
 
     context.user_data["pending_wallet_op"] = {
@@ -996,10 +1012,10 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
         "entry_col": col,
     }
     await query.edit_message_text(
-        f"✅ Расход: {category} — ${pending['amount']:,.2f}\n📄 {sheet_name}, {location}",
+        f"✅ Expense: {category} — ${pending['amount']:,.2f}\n📄 {sheet_name}, {location}",
     )
     await query.message.reply_text(
-        "С какого кошелька списать?",
+        "Which wallet to take it from?",
         reply_markup=wallet_keyboard("walletop")
     )
 
@@ -1008,7 +1024,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update):
         return
 
-    await update.message.reply_text("📸 Читаю чек...")
+    await update.message.reply_text("📸 Reading the receipt...")
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_bytes = await file.download_as_bytearray()
@@ -1027,8 +1043,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "description": description,
             }
             await update.message.reply_text(
-                f"Чек прочитан: {description} — ${amount:,.2f}\n"
-                f"Не узнал категорию '{raw_category}'. Выбери из списка:",
+                f"Receipt read: {description} — ${amount:,.2f}\n"
+                f"Didn't recognize category '{raw_category}'. Pick from the list:",
                 reply_markup=category_keyboard("expensecat")
             )
             return
@@ -1044,13 +1060,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "entry_col": col,
         }
         await update.message.reply_text(
-            f"✅ Расход: {category} ({description}) — ${amount:,.2f}\n"
+            f"✅ Expense: {category} ({description}) — ${amount:,.2f}\n"
             f"📄 {sheet_name}, {location}\n\n"
-            f"С какого кошелька списать?",
+            f"Which wallet to take it from?",
             reply_markup=wallet_keyboard("walletop")
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Не смог разобрать чек: {e}")
+        await update.message.reply_text(f"❌ Couldn't process the receipt: {e}")
 
 
 async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1085,7 +1101,7 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if not matches:
             await update.message.reply_text(
-                f"❌ Не нашёл '{category}' в колонках A-Z на листе '{ws.title}'."
+                f"❌ Couldn't find '{category}' in columns A-Z on sheet '{ws.title}'."
             )
             return
 
@@ -1096,10 +1112,10 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
                     return row_vals[c - 1]
             return None
 
-        lines = [f"📄 Лист: {ws.title}", f"Найдено вхождений '{category}': {len(matches)}", ""]
+        lines = [f"📄 Sheet: {ws.title}", f"Occurrences of '{category}' found: {len(matches)}", ""]
         for row, col in matches:
             cl = col_idx_to_letter(col)
-            lines.append(f"--- Совпадение в {cl}{row} ---")
+            lines.append(f"--- Match at {cl}{row} ---")
             for r in range(row - 1, row + 6):
                 vals = []
                 for c in range(col, col + 2):
@@ -1112,7 +1128,7 @@ async def handle_debug_income(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+        await update.message.reply_text(f"❌ Diagnostic error: {e}")
 
 
 async def handle_debug_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1124,7 +1140,7 @@ async def handle_debug_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     category = update.message.text.partition(" ")[2].strip()
     if not category:
-        await update.message.reply_text("Использование: /debugfixed Rent")
+        await update.message.reply_text("Usage: /debugfixed Rent")
         return
 
     try:
@@ -1153,14 +1169,14 @@ async def handle_debug_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if not found_row:
             await update.message.reply_text(
-                f"❌ Не нашёл категорию '{category}' в колонках A-AB на листе '{ws.title}'."
+                f"❌ Couldn't find category '{category}' in columns A-AB on sheet '{ws.title}'."
             )
             return
 
         col_letter = col_idx_to_letter(found_col)
         lines = [
-            f"📄 Лист: {ws.title}",
-            f"Категория: {category}, найдена в {col_letter}{found_row}",
+            f"📄 Sheet: {ws.title}",
+            f"Category: {category}, found at {col_letter}{found_row}",
             "",
         ]
         for r in range(found_row - 2, found_row + 3):
@@ -1173,7 +1189,7 @@ async def handle_debug_fixed(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+        await update.message.reply_text(f"❌ Diagnostic error: {e}")
 
 
 async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1185,7 +1201,7 @@ async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TY
 
     category = update.message.text.partition(" ")[2].strip()
     if not category:
-        await update.message.reply_text("Использование: /debugcategory Groceries")
+        await update.message.reply_text("Usage: /debugcategory Groceries")
         return
 
     try:
@@ -1207,7 +1223,7 @@ async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TY
 
         if not found_row:
             await update.message.reply_text(
-                f"❌ Не нашёл категорию '{category}' в колонках K-Z на листе '{ws.title}'."
+                f"❌ Couldn't find category '{category}' in columns K-Z on sheet '{ws.title}'."
             )
             return
 
@@ -1220,8 +1236,8 @@ async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TY
 
         col_letter = col_idx_to_letter(found_col)
         lines = [
-            f"📄 Лист: {ws.title}",
-            f"Категория: {category}, найдена в {col_letter}{found_row}",
+            f"📄 Sheet: {ws.title}",
+            f"Category: {category}, found at {col_letter}{found_row}",
             "",
         ]
         for r in range(found_row - 1, found_row + 25):
@@ -1234,7 +1250,7 @@ async def handle_debug_category(update: Update, context: ContextTypes.DEFAULT_TY
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+        await update.message.reply_text(f"❌ Diagnostic error: {e}")
 
 
 async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1251,7 +1267,7 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
         ws = get_month_worksheet(spreadsheet)
         header_row = find_wallet_header_row(ws, wallet)
 
-        lines = [f"📄 Лист: {ws.title}", f"Кошелёк: {wallet}, найден в строке {header_row}", ""]
+        lines = [f"📄 Sheet: {ws.title}", f"Wallet: {wallet}, found at row {header_row}", ""]
         for r in range(header_row - 1, header_row + 8):
             a = ws.cell(r, 1).value
             b = ws.cell(r, 2).value
@@ -1261,11 +1277,11 @@ async def handle_debug_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         next_row = find_next_wallet_row(ws, header_row)
         lines.append("")
-        lines.append(f"➡️ find_next_wallet_row вернула: {next_row}")
+        lines.append(f"➡️ find_next_wallet_row returned: {next_row}")
 
         await update.message.reply_text("\n".join(lines))
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка диагностики: {e}")
+        await update.message.reply_text(f"❌ Diagnostic error: {e}")
 
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1296,12 +1312,12 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = total_income - total_expenses
         await update.message.reply_text(
             f"📊 {ws.title}\n\n"
-            f"💚 Доходы: ${total_income:,.2f}\n"
-            f"❤️ Расходы: ${total_expenses:,.2f}\n"
-            f"💛 Баланс: ${balance:,.2f}"
+            f"💚 Income: ${total_income:,.2f}\n"
+            f"❤️ Expenses: ${total_expenses:,.2f}\n"
+            f"💛 Balance: ${balance:,.2f}"
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при получении статуса: {e}")
+        await update.message.reply_text(f"❌ Error getting status: {e}")
 
 
 def main():
