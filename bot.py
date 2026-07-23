@@ -3,6 +3,7 @@ import logging
 import base64
 import json
 import re
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -131,6 +132,35 @@ WALLET_NAMES = ["RBC Credit", "RBC Checking", "Costco", "Walmart", "Cash"]
 _wallet_row_cache: dict = {}
 
 
+def _sheets_call(fn, *args, retries=4, **kwargs):
+    """Call a gspread function, retrying on 429 (rate-limit) errors with
+    exponential back-off. Covers all the read/write helpers below."""
+    delay = 5
+    for attempt in range(retries):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if e.response.status_code == 429 and attempt < retries - 1:
+                logger.warning("Google Sheets 429 rate-limit, retrying in %ss …", delay)
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+
+
+def find_wallet_header_row_from_col(col_a_values: list, wallet: str, sheet_title: str) -> int:
+    """Find the header row of a wallet inside a pre-fetched column-A list
+    (1-indexed). Updates _wallet_row_cache as a side-effect."""
+    for idx, val in enumerate(col_a_values, start=1):
+        if (val or "").strip().lower() == wallet.lower():
+            _wallet_row_cache.setdefault(sheet_title, {})[wallet] = idx
+            return idx
+    raise ValueError(
+        f"Couldn't find wallet '{wallet}' on sheet '{sheet_title}'. "
+        f"Check that the name in column A is spelled exactly the same way."
+    )
+
+
 def find_wallet_header_row(ws, wallet: str) -> int:
     """Find the row where column A exactly equals the wallet's name.
     Searches dynamically instead of relying on a fixed row number, since rows
@@ -139,20 +169,12 @@ def find_wallet_header_row(ws, wallet: str) -> int:
     cached = _wallet_row_cache.get(cache_key, {})
     if wallet in cached:
         # Verify the cached row is still correct before trusting it
-        cell_val = (ws.cell(cached[wallet], WALLET_COL_DATE_DESC).value or "").strip()
+        cell_val = (_sheets_call(ws.cell, cached[wallet], WALLET_COL_DATE_DESC).value or "").strip()
         if cell_val.lower() == wallet.lower():
             return cached[wallet]
 
-    col_values = ws.col_values(WALLET_COL_DATE_DESC)  # 1-indexed list, column A
-    for idx, val in enumerate(col_values, start=1):
-        if (val or "").strip().lower() == wallet.lower():
-            _wallet_row_cache.setdefault(cache_key, {})[wallet] = idx
-            return idx
-
-    raise ValueError(
-        f"Couldn't find wallet '{wallet}' on sheet '{ws.title}'. "
-        f"Check that the name in column A is spelled exactly the same way."
-    )
+    col_values = _sheets_call(ws.col_values, WALLET_COL_DATE_DESC)
+    return find_wallet_header_row_from_col(col_values, wallet, ws.title)
 
 
 def get_sheet():
@@ -220,7 +242,23 @@ def find_next_wallet_row(ws, header_row: int) -> int:
     row = header_row + 1
     max_row = header_row + 300  # generous safety bound
     while row <= max_row:
-        cell_value = ws.cell(row, WALLET_COL_DATE_DESC).value
+        cell_value = _sheets_call(ws.cell, row, WALLET_COL_DATE_DESC).value
+        if not cell_value or not str(cell_value).strip():
+            return row
+        row += 1
+    raise ValueError("Couldn't find a free row in the wallet block (block is full).")
+
+
+def find_next_wallet_row_from_snapshot(all_values: list, header_row: int) -> int:
+    """Same as find_next_wallet_row but uses a pre-fetched get_all_values()
+    snapshot, avoiding extra API read calls."""
+    row = header_row + 1
+    max_row = header_row + 300
+    while row <= max_row:
+        if row - 1 < len(all_values):
+            cell_value = all_values[row - 1][WALLET_COL_DATE_DESC - 1] if len(all_values[row - 1]) >= WALLET_COL_DATE_DESC else ""
+        else:
+            cell_value = ""
         if not cell_value or not str(cell_value).strip():
             return row
         row += 1
@@ -231,8 +269,20 @@ def verify_wallet_labels(ws, header_row: int):
     """Safety check: confirm the wallet's header row itself has the
     income/outcome/Transfer labels in columns B/C/D (same row as the wallet
     name in column A), as a sanity check on sheet structure."""
-    income_label = (ws.cell(header_row, WALLET_COL_INCOME).value or "").strip().lower()
-    outcome_label = (ws.cell(header_row, WALLET_COL_OUTCOME).value or "").strip().lower()
+    income_label = (_sheets_call(ws.cell, header_row, WALLET_COL_INCOME).value or "").strip().lower()
+    outcome_label = (_sheets_call(ws.cell, header_row, WALLET_COL_OUTCOME).value or "").strip().lower()
+    if "income" not in income_label or "outcome" not in outcome_label:
+        raise ValueError(
+            f"The sheet structure has changed: row {header_row} doesn't have "
+            f"income/outcome next to the wallet name. Write cancelled, nothing was changed."
+        )
+
+
+def verify_wallet_labels_from_snapshot(all_values: list, header_row: int):
+    """Same as verify_wallet_labels but from a pre-fetched snapshot."""
+    row_vals = all_values[header_row - 1] if header_row - 1 < len(all_values) else []
+    income_label = (row_vals[WALLET_COL_INCOME - 1] if len(row_vals) >= WALLET_COL_INCOME else "").strip().lower()
+    outcome_label = (row_vals[WALLET_COL_OUTCOME - 1] if len(row_vals) >= WALLET_COL_OUTCOME else "").strip().lower()
     if "income" not in income_label or "outcome" not in outcome_label:
         raise ValueError(
             f"The sheet structure has changed: row {header_row} doesn't have "
@@ -242,40 +292,42 @@ def verify_wallet_labels(ws, header_row: int):
 
 def write_wallet_entry(wallet: str, kind: str, amount: float, description: str):
     """Write an income or outcome entry into the wallet's block on the current
-    month's worksheet (e.g. 'June 2026'). The wallet name and the
-    income/outcome/Transfer column labels live on the SAME row (e.g. row 144:
-    A='RBC Checking', B='income', C='outcome', D='Transfer'); data rows start
-    immediately below that.
-    kind: 'income' or 'outcome'."""
+    month's worksheet. Uses a single get_all_values() snapshot for all reads,
+    then writes with batch_update to minimize API calls."""
     if wallet not in WALLET_NAMES:
         raise ValueError(f"Unknown wallet: {wallet}")
 
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
-    header_row = find_wallet_header_row(ws, wallet)
+    all_values = _sheets_call(ws.get_all_values)
 
-    verify_wallet_labels(ws, header_row)
-
-    target_row = find_next_wallet_row(ws, header_row)
+    header_row = find_wallet_header_row_from_col(
+        [row[WALLET_COL_DATE_DESC - 1] if row else "" for row in all_values],
+        wallet, ws.title
+    )
+    verify_wallet_labels_from_snapshot(all_values, header_row)
+    target_row = find_next_wallet_row_from_snapshot(all_values, header_row)
 
     date_str = now_local().strftime("%d.%m")
     label = f"{date_str}  {description}"
-
     col = WALLET_COL_INCOME if kind == "income" else WALLET_COL_OUTCOME
 
-    ws.update_cell(target_row, WALLET_COL_DATE_DESC, label)
-    ws.update_cell(target_row, col, amount)
+    _sheets_call(ws.batch_update, [
+        {"range": gspread.utils.rowcol_to_a1(target_row, WALLET_COL_DATE_DESC),
+         "values": [[label]]},
+        {"range": gspread.utils.rowcol_to_a1(target_row, col),
+         "values": [[amount]]},
+    ])
 
     return ws.title, target_row
 
 
 def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
     """Record a transfer between two wallets on the current month's worksheet:
-    - from_wallet gets a row with the amount in column D (Transfer) — money
-      that left this wallet.
-    - to_wallet gets a row with the amount in column B (Income) — money that
-      arrived in this wallet.
-    Both amounts are positive. Returns (sheet_title, from_row, to_row)."""
+    - from_wallet gets a row with the amount in column D (Transfer).
+    - to_wallet gets a row with the amount in column B (Income).
+    Uses a single get_all_values() snapshot + batch_update to stay within
+    Google Sheets API rate limits. Returns (sheet_title, from_row, to_row)."""
     if from_wallet not in WALLET_NAMES:
         raise ValueError(f"Unknown wallet: {from_wallet}")
     if to_wallet not in WALLET_NAMES:
@@ -283,23 +335,40 @@ def write_transfer_entry(from_wallet: str, to_wallet: str, amount: float):
     if from_wallet == to_wallet:
         raise ValueError("Source wallet and destination wallet are the same.")
 
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
+    all_values = _sheets_call(ws.get_all_values)   # ← ONE read for entire sheet
 
-    from_header = find_wallet_header_row(ws, from_wallet)
-    to_header = find_wallet_header_row(ws, to_wallet)
-    verify_wallet_labels(ws, from_header)
-    verify_wallet_labels(ws, to_header)
+    col_a = [row[WALLET_COL_DATE_DESC - 1] if row else "" for row in all_values]
+
+    from_header = find_wallet_header_row_from_col(col_a, from_wallet, ws.title)
+    to_header   = find_wallet_header_row_from_col(col_a, to_wallet,   ws.title)
+    verify_wallet_labels_from_snapshot(all_values, from_header)
+    verify_wallet_labels_from_snapshot(all_values, to_header)
+
+    from_row = find_next_wallet_row_from_snapshot(all_values, from_header)
+
+    # Mark from_row as occupied so to_wallet lookup doesn't land on the same row
+    while len(all_values) < from_row:
+        all_values.append([])
+    if len(all_values[from_row - 1]) < WALLET_COL_DATE_DESC:
+        all_values[from_row - 1] += [""] * (WALLET_COL_DATE_DESC - len(all_values[from_row - 1]))
+    all_values[from_row - 1][WALLET_COL_DATE_DESC - 1] = "_reserved_"
+
+    to_row = find_next_wallet_row_from_snapshot(all_values, to_header)
 
     date_str = now_local().strftime("%d.%m")
 
-    from_row = find_next_wallet_row(ws, from_header)
-    ws.update_cell(from_row, WALLET_COL_DATE_DESC, f"{date_str}  Transfer")
-    ws.update_cell(from_row, WALLET_COL_TRANSFER, amount)
-
-    to_row = find_next_wallet_row(ws, to_header)
-    ws.update_cell(to_row, WALLET_COL_DATE_DESC, f"{date_str}  Transfer")
-    ws.update_cell(to_row, WALLET_COL_INCOME, amount)
+    _sheets_call(ws.batch_update, [       # ← ONE write for all 4 cells
+        {"range": gspread.utils.rowcol_to_a1(from_row, WALLET_COL_DATE_DESC),
+         "values": [[f"{date_str}  Transfer"]]},
+        {"range": gspread.utils.rowcol_to_a1(from_row, WALLET_COL_TRANSFER),
+         "values": [[amount]]},
+        {"range": gspread.utils.rowcol_to_a1(to_row, WALLET_COL_DATE_DESC),
+         "values": [[f"{date_str}  Transfer"]]},
+        {"range": gspread.utils.rowcol_to_a1(to_row, WALLET_COL_INCOME),
+         "values": [[amount]]},
+    ])
 
     return ws.title, from_row, to_row
 
@@ -388,9 +457,9 @@ def write_row_category_entry(category: str, amount: float, description: str):
     if category not in ROW_BASED_CATEGORIES and category not in INCOME_CATEGORIES:
         raise ValueError(f"Unknown row-based category: {category}")
 
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
-    all_values = ws.get_all_values()  # single API call for the whole sheet
+    all_values = _sheets_call(ws.get_all_values)  # single API call for the whole sheet
 
     header_row, header_col = find_category_header_row(all_values, ws.title, category)
     target_row = find_next_category_row(all_values, header_row, header_col)
@@ -398,8 +467,8 @@ def write_row_category_entry(category: str, amount: float, description: str):
     date_str = now_local().strftime("%d.%m.")
     label = f"{date_str} {description}"
 
-    ws.update_cell(target_row, header_col, label)
-    ws.update_cell(target_row, header_col + 1, amount)
+    _sheets_call(ws.update_cell, target_row, header_col, label)
+    _sheets_call(ws.update_cell, target_row, header_col + 1, amount)
 
     return ws.title, target_row, header_col
 
@@ -407,11 +476,11 @@ def write_row_category_entry(category: str, amount: float, description: str):
 def append_comment_to_cell(sheet_title: str, row: int, col: int, comment: str):
     """Append a user comment to an already-written description cell, e.g.
     turning 'DD.MM. Groceries' into 'DD.MM. Groceries [comment]'."""
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = spreadsheet.worksheet(sheet_title)
-    existing = ws.cell(row, col).value or ""
+    existing = _sheets_call(ws.cell, row, col).value or ""
     new_value = f"{existing} [{comment}]" if existing else f"[{comment}]"
-    ws.update_cell(row, col, new_value)
+    _sheets_call(ws.update_cell, row, col, new_value)
 
 
 def write_fixed_category_entry(category: str, amount: float):
@@ -421,11 +490,11 @@ def write_fixed_category_entry(category: str, amount: float):
     if category not in FIXED_CATEGORIES:
         raise ValueError(f"Unknown fixed category: {category}")
 
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_budget_worksheet(spreadsheet)
 
     found_row = None
-    col_values = ws.col_values(FIXED_COL_CATEGORY)
+    col_values = _sheets_call(ws.col_values, FIXED_COL_CATEGORY)
     for idx, val in enumerate(col_values, start=1):
         if (val or "").strip().lower() == category.lower():
             found_row = idx
@@ -436,7 +505,7 @@ def write_fixed_category_entry(category: str, amount: float):
             f"Couldn't find category '{category}' in column B on sheet '{ws.title}'."
         )
 
-    existing_raw = ws.cell(found_row, FIXED_COL_ACTUAL).value or "0"
+    existing_raw = _sheets_call(ws.cell, found_row, FIXED_COL_ACTUAL).value or "0"
     existing_clean = str(existing_raw).replace("$", "").strip().replace(",", ".")
     try:
         existing_amount = float(existing_clean) if existing_clean else 0.0
@@ -444,7 +513,7 @@ def write_fixed_category_entry(category: str, amount: float):
         existing_amount = 0.0
 
     new_amount = existing_amount + amount
-    ws.update_cell(found_row, FIXED_COL_ACTUAL, new_amount)
+    _sheets_call(ws.update_cell, found_row, FIXED_COL_ACTUAL, new_amount)
 
     return ws.title, found_row
 
@@ -453,19 +522,19 @@ def write_fixed_category_entry(category: str, amount: float):
 
 def write_salary(salary_number: str, amount: float):
     """Write amount into the correct 'Зарплата N' cell of the current month's sheet."""
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
     row = SALARY_ROWS.get(salary_number)
     if row is None:
         raise ValueError(f"Unknown salary number: {salary_number}")
-    ws.update_cell(row, 2, amount)  # column B
+    _sheets_call(ws.update_cell, row, 2, amount)  # column B
     return ws.title, row
 
 
 def write_bonus(amount: float):
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
-    ws.update_cell(BONUS_ROW, 2, amount)
+    _sheets_call(ws.update_cell, BONUS_ROW, 2, amount)
     return ws.title
 
 
@@ -473,7 +542,7 @@ def write_bonus(amount: float):
 
 def write_expense(description: str, amount: float):
     """Write an expense into today's row of the daily expense table."""
-    spreadsheet = get_sheet()
+    spreadsheet = _sheets_call(get_sheet)
     ws = get_month_worksheet(spreadsheet)
 
     today = now_local().day
@@ -483,8 +552,8 @@ def write_expense(description: str, amount: float):
     # Dates are pre-filled sequentially starting at row 2 = day 1
     target_row = today + 1
 
-    existing_desc = ws.cell(target_row, desc_col_idx).value or ""
-    existing_amount = ws.cell(target_row, amount_col_idx).value or ""
+    existing_desc = _sheets_call(ws.cell, target_row, desc_col_idx).value or ""
+    existing_amount = _sheets_call(ws.cell, target_row, amount_col_idx).value or ""
 
     new_desc = f"{existing_desc}, {description}" if existing_desc else description
     try:
@@ -492,8 +561,8 @@ def write_expense(description: str, amount: float):
     except ValueError:
         new_amount = amount
 
-    ws.update_cell(target_row, desc_col_idx, new_desc)
-    ws.update_cell(target_row, amount_col_idx, new_amount)
+    _sheets_call(ws.update_cell, target_row, desc_col_idx, new_desc)
+    _sheets_call(ws.update_cell, target_row, amount_col_idx, new_amount)
     return ws.title, target_row
 
 
