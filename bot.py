@@ -132,20 +132,12 @@ WALLET_NAMES = ["RBC Credit", "RBC Checking", "Costco", "Walmart", "Cash"]
 _wallet_row_cache: dict = {}
 
 
-def _sheets_call(fn, *args, retries=4, **kwargs):
-    """Call a gspread function, retrying on 429 (rate-limit) errors with
-    exponential back-off. Covers all the read/write helpers below."""
-    delay = 5
-    for attempt in range(retries):
-        try:
-            return fn(*args, **kwargs)
-        except gspread.exceptions.APIError as e:
-            if e.response.status_code == 429 and attempt < retries - 1:
-                logger.warning("Google Sheets 429 rate-limit, retrying in %ss …", delay)
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise
+def _sheets_call(fn, *args, **kwargs):
+    """Thin wrapper around gspread calls — kept so all API calls go through
+    one place (easy to add logging or swap transport later). No blocking
+    sleep here: the reduced call count (get_all_values + batch_update) is
+    the main guard against 429 rate-limit errors."""
+    return fn(*args, **kwargs)
 
 
 def find_wallet_header_row_from_col(col_a_values: list, wallet: str, sheet_title: str) -> int:
