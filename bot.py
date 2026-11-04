@@ -64,17 +64,17 @@ EXPENSE_AMOUNT_COL = "AG"
 # then date+description / amount rows below, with a 'Total' row further down.
 #
 # The 6 "fixed monthly payment" categories (Rent, Phone, BC Hydro, Netflix,
-# YouTube Music, Auto Insurance) used to live only on the FINANCE sheet, but
+# YouTube Music, Car Insurance) used to live only on the FINANCE sheet, but
 # the June 2026 sheet ALSO has real row-based blocks for them (column N/O,
 # same Total-row-above / header / accumulating-data-rows-below pattern as
 # every other category here), confirmed via /debugcategory. As of June 2026
 # they're written here instead, to stop the FINANCE-vs-month-sheet confusion.
 ROW_BASED_CATEGORIES = [
-    "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurants", "Bowling",
+    "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurant", "Bowling",
     "GIM", "Skiing", "Medication", "Hair Cut", "Dining Out", "Clothing",
-    "Sauna", "Audiobooks", "Vehicle loan", "Car Wash", "Charity", "Gifts",
-    "Tim Hortons", "Tickets", "Hotels", "Food in travel",
-    "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Auto Insurance",
+    "Sauna", "Audiobooks", "Car loan", "Car Wash", "Charity", "Gifts",
+    "Tim Hortons", "Intertainment", "Savings", "FEE", "Housing", "Travel",
+    "Rent", "Phone", "BC Hydro", "Netflix", "YouTube Music", "Car Insurance",
     "Parking",
 ]
 
@@ -124,7 +124,7 @@ WALLET_COL_INCOME    = 2  # column B
 WALLET_COL_OUTCOME   = 3  # column C
 WALLET_COL_TRANSFER  = 4  # column D
 
-WALLET_NAMES = ["RBC Credit", "RBC Checking", "Costco", "Walmart", "Cash"]
+WALLET_NAMES = ["RBC Credit", "RBC Checking", "Walmart", "CIBC", "Savings", "Cash"]
 
 # Cache of {sheet_title: {wallet_name: header_row}} to avoid re-scanning the whole
 # column on every single write within the same process lifetime. Cleared per-process;
