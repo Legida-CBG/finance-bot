@@ -465,6 +465,175 @@ def write_row_category_entry(category: str, amount: float, description: str):
     return ws.title, target_row, header_col
 
 
+# ─── Budget preview (shown BEFORE an expense is written) ─────────────────────
+#
+# Budgets live on the 'FINANCE - <Month> <Year>' sheet as 'Projected cost'
+# cells. The 'Actual cost' cell right next to each one is a formula that
+# points at the category's 'Total' cell on the month sheet, e.g.
+# ='November 2026'!L88. So we find the category block on the month sheet,
+# locate its Total cell, then find which FINANCE cell references it — the
+# budget is the cell immediately to the LEFT of that reference. This avoids
+# having to keep a name-mapping between bot categories and FINANCE labels.
+
+# Fallback only: if no formula reference is found, try these FINANCE labels.
+BUDGET_LABEL_ALIASES = {
+    "Car loan": "Vehicle loan",
+    "Car Wash": "CarWash",
+    "Car Insurance": "Auto Insurance",
+    "Restaurant": "Restaurants",
+    "Medication": "Medical",
+    "FHSA": "First home FHSA",
+    "TFSA": "Investment account TFSA",
+    "Skiing": "SKI",
+    "YouTube Music": "Youtube music",
+}
+
+
+def _to_number(value) -> float:
+    """Convert an unformatted sheet value to float; anything non-numeric → 0."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace("$", "").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _col_idx_to_letter(idx: int) -> str:
+    letters = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def get_category_budget_status(category: str) -> dict:
+    """Return {'budget': float|None, 'spent': float} for an expense category
+    in the current month. Read-only — writes nothing."""
+    spreadsheet = _sheets_call(get_sheet)
+    month_ws = get_month_worksheet(spreadsheet)
+    month_vals = _sheets_call(month_ws.get_all_values, value_render_option="UNFORMATTED_VALUE")
+    month_vals = [[("" if v is None else v) for v in row] for row in month_vals]
+    # find_category_header_row expects strings
+    month_str = [[str(v) for v in row] for row in month_vals]
+
+    header_row, header_col = find_category_header_row(month_str, month_ws.title, category)
+
+    # Sum amounts below the header until the block's 'Total' row.
+    spent = 0.0
+    total_row = None
+    for r in range(header_row + 1, header_row + 101):
+        if r - 1 >= len(month_vals):
+            break
+        row_vals = month_vals[r - 1]
+        desc = str(row_vals[header_col - 1]).strip() if header_col - 1 < len(row_vals) else ""
+        if desc.lower() == "total":
+            total_row = r
+            break
+        amount = row_vals[header_col] if header_col < len(row_vals) else ""
+        spent += _to_number(amount)
+
+    budget = None
+    try:
+        fin_ws = get_budget_worksheet(spreadsheet)
+        fin_formulas = _sheets_call(fin_ws.get_all_values, value_render_option="FORMULA")
+        fin_vals = _sheets_call(fin_ws.get_all_values, value_render_option="UNFORMATTED_VALUE")
+
+        def cell(rows, r, c):  # 0-indexed
+            if r < len(rows) and 0 <= c < len(rows[r]):
+                return rows[r][c]
+            return ""
+
+        # 1) Preferred: find the FINANCE cell whose formula points at our Total cell.
+        if total_row is not None:
+            ref = f"{_col_idx_to_letter(header_col + 1)}{total_row}"
+            pattern = re.compile(
+                r"'?" + re.escape(month_ws.title.strip()) + r"\s*'?!\$?"
+                + re.escape(_col_idx_to_letter(header_col + 1)) + r"\$?" + str(total_row) + r"(?!\d)",
+                re.IGNORECASE,
+            )
+            for r_idx, row in enumerate(fin_formulas):
+                for c_idx, f in enumerate(row):
+                    if isinstance(f, str) and f.startswith("=") and pattern.search(f) and c_idx > 0:
+                        budget = _to_number(cell(fin_vals, r_idx, c_idx - 1))
+                        break
+                if budget is not None:
+                    break
+
+        # 2) Fallback: match by label (category name or alias) on FINANCE.
+        if budget is None:
+            names = {category.lower(), BUDGET_LABEL_ALIASES.get(category, category).lower()}
+            for r_idx, row in enumerate(fin_vals):
+                for c_idx, v in enumerate(row):
+                    if isinstance(v, str) and v.strip().lower() in names:
+                        nxt = cell(fin_vals, r_idx, c_idx + 1)
+                        if nxt != "":
+                            budget = _to_number(nxt)
+                            break
+                if budget is not None:
+                    break
+    except Exception as e:
+        logger.warning(f"Budget lookup failed for {category}: {e}")
+
+    return {"budget": budget, "spent": spent}
+
+
+def format_budget_preview(category: str, amount: float, status: dict) -> str:
+    """Human-readable budget block shown before the expense is recorded."""
+    spent = status["spent"]
+    budget = status["budget"]
+    after = spent + amount
+    lines = [f"💸 Spent this month: ${spent:,.2f}"]
+    if budget:
+        left = budget - spent
+        pct = spent / budget * 100
+        lines.insert(0, f"📊 Budget for {category}: ${budget:,.2f}")
+        lines[-1] += f" ({pct:.0f}%)"
+        lines.append(f"✅ Left: ${left:,.2f}" if left >= 0 else f"🔴 Over budget by ${-left:,.2f}")
+        left_after = budget - after
+        if left_after >= 0:
+            lines.append(f"➡️ After this expense: left ${left_after:,.2f}")
+        else:
+            lines.append(f"⚠️ After this expense: over budget by ${-left_after:,.2f}")
+    else:
+        lines.insert(0, f"📊 No budget set for {category}")
+        lines.append(f"➡️ After this expense: ${after:,.2f}")
+    return "\n".join(lines)
+
+
+def expense_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Wallet buttons + a Cancel button. Picking a wallet = confirm & record."""
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"walletop|{name}")]
+        for name in WALLET_NAMES
+    ]
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancelexpense")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def build_expense_preview(category: str, amount: float, description: str, context) -> str:
+    """Store the expense as pending (NOT written yet) and return the preview text."""
+    context.user_data["pending_wallet_op"] = {
+        "kind": "outcome",
+        "amount": amount,
+        "description": category,
+        # category-block write is deferred until a wallet is picked
+        "pending_category": category,
+        "pending_category_description": description,
+    }
+    try:
+        status = get_category_budget_status(category)
+        budget_text = format_budget_preview(category, amount, status)
+    except Exception as e:
+        budget_text = f"📊 Couldn't read budget: {e}"
+
+    return (
+        f"🧾 Expense: {category} — ${amount:,.2f}\n\n"
+        f"{budget_text}\n\n"
+        f"Pick a wallet to record it, or Cancel:"
+    )
+
+
 def append_comment_to_cell(sheet_title: str, row: int, col: int, comment: str):
     """Append a user comment to an already-written description cell, e.g.
     turning 'DD.MM. Groceries' into 'DD.MM. Groceries [comment]'."""
@@ -856,25 +1025,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        try:
-            sheet_name, location, row, col = write_expense_to_category(category, amount, description_raw)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error recording entry: {e}")
-            return
-
-        context.user_data["pending_wallet_op"] = {
-            "kind": "outcome",
-            "amount": amount,
-            "description": category,
-            "entry_sheet": sheet_name,
-            "entry_row": row,
-            "entry_col": col,
-        }
-        await update.message.reply_text(
-            f"✅ Expense: {category} — ${amount:,.2f}\n📄 {sheet_name}, {location}\n\n"
-            f"Which wallet to take it from?",
-            reply_markup=wallet_keyboard("walletop")
-        )
+        text_out = build_expense_preview(category, amount, description_raw, context)
+        await update.message.reply_text(text_out, reply_markup=expense_confirm_keyboard())
         return
 
     await update.message.reply_text(
@@ -904,6 +1056,21 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("⚠️ Couldn't find the operation to record (the bot may have restarted). Please try again.")
         return
 
+    # Deferred expense: the category block hasn't been written yet — the
+    # person just confirmed by picking a wallet, so write it now.
+    if op.get("pending_category"):
+        try:
+            entry_sheet, location, entry_row, entry_col = write_expense_to_category(
+                op["pending_category"], op["amount"], op["pending_category_description"]
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error recording entry: {e}")
+            return
+        op["entry_sheet"], op["entry_row"], op["entry_col"] = entry_sheet, entry_row, entry_col
+        await query.edit_message_text(
+            f"✅ Expense: {op['pending_category']} — ${op['amount']:,.2f}\n📄 {entry_sheet}, {location}"
+        )
+
     try:
         sheet_name, row = write_wallet_entry(
             wallet=wallet,
@@ -912,11 +1079,15 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             description=op["description"],
         )
         kind_label = "Income" if op["kind"] == "income" else "Expense"
-        await query.edit_message_text(
+        wallet_msg = (
             f"✅ {kind_label} ${op['amount']:,.2f} recorded to wallet *{wallet}*\n"
-            f"📄 {sheet_name}, row {row}",
-            parse_mode="Markdown"
+            f"📄 {sheet_name}, row {row}"
         )
+        if op.get("pending_category"):
+            # keep the category confirmation visible; send wallet info separately
+            await query.message.reply_text(wallet_msg, parse_mode="Markdown")
+        else:
+            await query.edit_message_text(wallet_msg, parse_mode="Markdown")
 
         # If we know exactly which cell holds the category-block entry,
         # offer to attach a free-text comment to it.
@@ -931,7 +1102,10 @@ async def handle_wallet_choice(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=comment_skip_keyboard()
             )
     except Exception as e:
-        await query.edit_message_text(f"❌ Error recording to wallet: {e}")
+        if op.get("pending_category"):
+            await query.message.reply_text(f"❌ Error recording to wallet: {e}")
+        else:
+            await query.edit_message_text(f"❌ Error recording to wallet: {e}")
 
 
 async def handle_transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1022,6 +1196,18 @@ async def handle_transfer_to_choice(update: Update, context: ContextTypes.DEFAUL
     await query.message.reply_text(f"Transfer amount ({from_wallet} → {wallet})?")
 
 
+async def handle_cancel_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'❌ Cancel' on the budget preview — drop the pending expense, write nothing."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+
+    context.user_data.pop("pending_wallet_op", None)
+    await query.edit_message_text("❌ Cancelled. Nothing was recorded.")
+
+
 async def handle_skip_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the 'No comment' button — just clears the pending comment slot."""
     query = update.callback_query
@@ -1056,29 +1242,8 @@ async def handle_category_choice(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("⚠️ Couldn't find the operation to record (the bot may have restarted). Please try again.")
         return
 
-    try:
-        sheet_name, location, row, col = write_expense_to_category(
-            category, pending["amount"], pending["description"]
-        )
-    except Exception as e:
-        await query.edit_message_text(f"❌ Error recording entry: {e}")
-        return
-
-    context.user_data["pending_wallet_op"] = {
-        "kind": "outcome",
-        "amount": pending["amount"],
-        "description": category,
-        "entry_sheet": sheet_name,
-        "entry_row": row,
-        "entry_col": col,
-    }
-    await query.edit_message_text(
-        f"✅ Expense: {category} — ${pending['amount']:,.2f}\n📄 {sheet_name}, {location}",
-    )
-    await query.message.reply_text(
-        "Which wallet to take it from?",
-        reply_markup=wallet_keyboard("walletop")
-    )
+    text_out = build_expense_preview(category, pending["amount"], pending["description"], context)
+    await query.edit_message_text(text_out, reply_markup=expense_confirm_keyboard())
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1110,21 +1275,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        sheet_name, location, row, col = write_expense_to_category(category, amount, description)
-
-        context.user_data["pending_wallet_op"] = {
-            "kind": "outcome",
-            "amount": amount,
-            "description": category,
-            "entry_sheet": sheet_name,
-            "entry_row": row,
-            "entry_col": col,
-        }
+        text_out = build_expense_preview(category, amount, description, context)
         await update.message.reply_text(
-            f"✅ Expense: {category} ({description}) — ${amount:,.2f}\n"
-            f"📄 {sheet_name}, {location}\n\n"
-            f"Which wallet to take it from?",
-            reply_markup=wallet_keyboard("walletop")
+            f"Receipt read: {description}\n\n{text_out}",
+            reply_markup=expense_confirm_keyboard()
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Couldn't process the receipt: {e}")
@@ -1397,6 +1551,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_transfer_to_choice, pattern=r"^transferto\|"))
     app.add_handler(CallbackQueryHandler(handle_category_choice, pattern=r"^expensecat\|"))
     app.add_handler(CallbackQueryHandler(handle_skip_comment, pattern=r"^skipcomment$"))
+    app.add_handler(CallbackQueryHandler(handle_cancel_expense, pattern=r"^cancelexpense$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started!")
