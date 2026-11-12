@@ -70,7 +70,7 @@ EXPENSE_AMOUNT_COL = "AG"
 # every other category here), confirmed via /debugcategory. As of June 2026
 # they're written here instead, to stop the FINANCE-vs-month-sheet confusion.
 ROW_BASED_CATEGORIES = [
-    "Groceries", "Alcohol", "Fuel", "FHSA", "TFSA", "Restaurant", "Bowling",
+    "Groceries", "Alcohol", "Fuel", "FHSA","Health insurance", "TFSA", "Restaurant", "Bowling",
     "GIM", "Skiing", "Medication", "Hair Cut", "Dining Out", "Clothing",
     "Sauna", "Audiobooks", "Car loan", "Car Wash", "Charity", "Gifts",
     "Tim Hortons", "Intertainment", "Saving", "FEE", "Housing", "Travel",
